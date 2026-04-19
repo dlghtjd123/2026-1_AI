@@ -26,7 +26,7 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def set_seed(seed=42):
+def set_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -69,14 +69,14 @@ class CNNLSTMModel(nn.Module):
 
     def forward(self, x):
         # x: (batch, seq_len, feature)
-        x = x.permute(0, 2, 1)          # (batch, feature, seq_len)
-        x = self.conv1(x)               # (batch, conv_channels, seq_len)
+        x = x.permute(0, 2, 1)   # (batch, feature, seq_len)
+        x = self.conv1(x)        # (batch, conv_channels, seq_len)
         x = self.relu(x)
         x = self.dropout(x)
 
-        x = x.permute(0, 2, 1)          # (batch, seq_len, conv_channels)
-        _, (h_n, _) = self.lstm(x)      # h_n: (num_layers, batch, hidden)
-        x = h_n[-1]                     # (batch, hidden)
+        x = x.permute(0, 2, 1)   # (batch, seq_len, conv_channels)
+        _, (h_n, _) = self.lstm(x)
+        x = h_n[-1]              # (batch, lstm_hidden)
 
         x = self.dropout(x)
         logits = self.fc(x).squeeze(1)  # (batch,)
@@ -85,15 +85,12 @@ class CNNLSTMModel(nn.Module):
 
 def load_data():
     X_train = np.load(DATA_DIR / "X_train.npy")
-    y_train = np.load(DATA_DIR / "y_train.npy")
+    y_train = np.load(DATA_DIR / "y_train.npy").astype(int)
 
     X_val = np.load(DATA_DIR / "X_val.npy")
-    y_val = np.load(DATA_DIR / "y_val.npy")
+    y_val = np.load(DATA_DIR / "y_val.npy").astype(int)
 
-    X_test = np.load(DATA_DIR / "X_test.npy")
-    y_test = np.load(DATA_DIR / "y_test.npy")
-
-    return X_train, y_train, X_val, y_val, X_test, y_test
+    return X_train, y_train, X_val, y_val
 
 
 def compute_metrics(y_true, y_pred, y_prob):
@@ -116,18 +113,33 @@ def compute_metrics(y_true, y_pred, y_prob):
     return metrics
 
 
-def print_metrics(name, metrics):
-    print(f"\n===== {name} =====")
-    print(f"Accuracy : {metrics['accuracy']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall   : {metrics['recall']:.4f}")
-    print(f"F1-score : {metrics['f1']:.4f}")
-    print(f"ROC-AUC  : {metrics['roc_auc']:.4f}" if metrics["roc_auc"] is not None else "ROC-AUC  : None")
-    print("Confusion Matrix:")
-    print(np.array(metrics["confusion_matrix"]))
+def pick_best_threshold(y_true, y_prob):
+    best_score = None
+    best_threshold = 0.5
+    best_metrics = None
+
+    for threshold in np.arange(0.05, 0.96, 0.01):
+        y_pred = (y_prob >= threshold).astype(int)
+        metrics = compute_metrics(y_true, y_pred, y_prob)
+
+        # 우선순위: F1 > Recall > Precision > 0.5와의 거리
+        score = (
+            metrics["f1"],
+            metrics["recall"],
+            metrics["precision"],
+            -abs(threshold - 0.5),
+        )
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_threshold = float(round(threshold, 4))
+            best_metrics = metrics
+
+    best_metrics["selected_threshold"] = best_threshold
+    return best_threshold, best_metrics
 
 
-def evaluate_model(model, loader, device, criterion=None):
+def collect_probs_and_loss(model, loader, device, criterion):
     model.eval()
 
     total_loss = 0.0
@@ -142,23 +154,35 @@ def evaluate_model(model, loader, device, criterion=None):
             logits = model(X_batch)
             probs = torch.sigmoid(logits)
 
-            if criterion is not None:
-                loss = criterion(logits, y_batch)
-                total_loss += loss.item() * X_batch.size(0)
+            loss = criterion(logits, y_batch)
+            total_loss += loss.item() * X_batch.size(0)
 
             y_true_all.extend(y_batch.cpu().numpy().tolist())
             y_prob_all.extend(probs.cpu().numpy().tolist())
 
+    avg_loss = total_loss / len(loader.dataset)
     y_true_all = np.array(y_true_all).astype(int)
     y_prob_all = np.array(y_prob_all)
-    y_pred_all = (y_prob_all >= 0.5).astype(int)
 
-    metrics = compute_metrics(y_true_all, y_pred_all, y_prob_all)
+    return avg_loss, y_true_all, y_prob_all
 
-    if criterion is not None:
-        metrics["loss"] = total_loss / len(loader.dataset)
 
-    return metrics
+def print_metrics(name, metrics, loss=None):
+    print(f"\n===== {name} =====")
+    if loss is not None:
+        print(f"Loss      : {loss:.4f}")
+    print(f"Threshold : {metrics.get('selected_threshold', 0.5):.2f}")
+    print(f"Accuracy  : {metrics['accuracy']:.4f}")
+    print(f"Precision : {metrics['precision']:.4f}")
+    print(f"Recall    : {metrics['recall']:.4f}")
+    print(f"F1-score  : {metrics['f1']:.4f}")
+    print(
+        f"ROC-AUC   : {metrics['roc_auc']:.4f}"
+        if metrics["roc_auc"] is not None
+        else "ROC-AUC   : None"
+    )
+    print("Confusion Matrix:")
+    print(np.array(metrics["confusion_matrix"]))
 
 
 def main():
@@ -167,21 +191,28 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("[INFO] Device:", device)
 
-    X_train, y_train, X_val, y_val, X_test, y_test = load_data()
+    X_train, y_train, X_val, y_val = load_data()
 
     print("[INFO] X_train shape:", X_train.shape)
     print("[INFO] X_val shape  :", X_val.shape)
-    print("[INFO] X_test shape :", X_test.shape)
 
     n_features = X_train.shape[2]
 
     train_dataset = SequenceDataset(X_train, y_train)
     val_dataset = SequenceDataset(X_val, y_val)
-    test_dataset = SequenceDataset(X_test, y_test)
 
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=128,
+        shuffle=True,
+        num_workers=0,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=256,
+        shuffle=False,
+        num_workers=0,
+    )
 
     model = CNNLSTMModel(
         n_features=n_features,
@@ -195,13 +226,19 @@ def main():
     pos_weight_value = float(neg_count / pos_count) if pos_count > 0 else 1.0
     pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32).to(device)
 
+    print(f"[INFO] pos_weight: {pos_weight_value:.4f}")
+
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     num_epochs = 30
     patience = 5
-    best_val_f1 = -1.0
+    best_score = None
     best_state = None
+    best_threshold = 0.5
+    best_epoch = 0
+    best_val_loss = None
+    best_val_metrics = None
     patience_counter = 0
 
     for epoch in range(1, num_epochs + 1):
@@ -216,24 +253,53 @@ def main():
             logits = model(X_batch)
             loss = criterion(logits, y_batch)
             loss.backward()
-            optimizer.step()
 
+            # gradient explosion 방지
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+
+            optimizer.step()
             running_loss += loss.item() * X_batch.size(0)
 
         train_loss = running_loss / len(train_loader.dataset)
-        val_metrics = evaluate_model(model, val_loader, device, criterion)
+
+        val_loss, y_val_true, y_val_prob = collect_probs_and_loss(
+            model, val_loader, device, criterion
+        )
+        current_threshold, current_val_metrics = pick_best_threshold(
+            y_val_true, y_val_prob
+        )
+
+        # best model 선정 기준:
+        # 1) val F1
+        # 2) val Recall
+        # 3) val Precision
+        # 4) ROC-AUC
+        # 5) val_loss가 더 작은 쪽
+        current_score = (
+            current_val_metrics["f1"],
+            current_val_metrics["recall"],
+            current_val_metrics["precision"],
+            current_val_metrics["roc_auc"] if current_val_metrics["roc_auc"] is not None else -1.0,
+            -val_loss,
+        )
 
         print(
             f"[Epoch {epoch:02d}] "
             f"train_loss={train_loss:.4f} | "
-            f"val_loss={val_metrics['loss']:.4f} | "
-            f"val_f1={val_metrics['f1']:.4f} | "
-            f"val_recall={val_metrics['recall']:.4f}"
+            f"val_loss={val_loss:.4f} | "
+            f"val_thr={current_threshold:.2f} | "
+            f"val_f1={current_val_metrics['f1']:.4f} | "
+            f"val_recall={current_val_metrics['recall']:.4f} | "
+            f"val_precision={current_val_metrics['precision']:.4f}"
         )
 
-        if val_metrics["f1"] > best_val_f1:
-            best_val_f1 = val_metrics["f1"]
+        if best_score is None or current_score > best_score:
+            best_score = current_score
             best_state = copy.deepcopy(model.state_dict())
+            best_threshold = current_threshold
+            best_epoch = epoch
+            best_val_loss = val_loss
+            best_val_metrics = current_val_metrics
             patience_counter = 0
         else:
             patience_counter += 1
@@ -245,13 +311,11 @@ def main():
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # best validation
-    best_val_metrics = evaluate_model(model, val_loader, device, criterion)
-    print_metrics("CNN-LSTM Validation", best_val_metrics)
+    # 저장 직전 정보 다시 반영
+    best_val_metrics["selected_threshold"] = best_threshold
 
-    # final test
-    test_metrics = evaluate_model(model, test_loader, device, criterion)
-    print_metrics("CNN-LSTM Test", test_metrics)
+    print(f"\n[INFO] Best epoch: {best_epoch}")
+    print_metrics("CNN-LSTM Validation (Best Model)", best_val_metrics, loss=best_val_loss)
 
     torch.save(
         {
@@ -264,15 +328,15 @@ def main():
         MODEL_DIR / "cnn_lstm_model.pt",
     )
 
+    with open(MODEL_DIR / "cnn_lstm_threshold.json", "w", encoding="utf-8") as f:
+        json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
+
     with open(RESULT_DIR / "cnn_lstm_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(best_val_metrics, f, indent=4, ensure_ascii=False)
 
-    with open(RESULT_DIR / "cnn_lstm_test_metrics.json", "w", encoding="utf-8") as f:
-        json.dump(test_metrics, f, indent=4, ensure_ascii=False)
-
     print("\n[SAVED] artifacts/models/cnn_lstm_model.pt")
+    print("[SAVED] artifacts/models/cnn_lstm_threshold.json")
     print("[SAVED] artifacts/results/cnn_lstm_val_metrics.json")
-    print("[SAVED] artifacts/results/cnn_lstm_test_metrics.json")
 
 
 if __name__ == "__main__":

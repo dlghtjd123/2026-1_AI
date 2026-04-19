@@ -62,8 +62,14 @@ class CNNLSTMModel(nn.Module):
         return logits
 
 
-def compute_metrics(y_true, y_pred, y_prob):
+def load_threshold(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)["threshold"]
+
+
+def compute_metrics(y_true, y_pred, y_prob, threshold):
     metrics = {
+        "threshold": float(threshold),
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred, zero_division=0)),
@@ -82,32 +88,51 @@ def compute_metrics(y_true, y_pred, y_prob):
     return metrics
 
 
+def print_metrics(name, metrics):
+    print(f"\n===== {name} =====")
+    print(f"Threshold : {metrics['threshold']:.2f}")
+    print(f"Accuracy  : {metrics['accuracy']:.4f}")
+    print(f"Precision : {metrics['precision']:.4f}")
+    print(f"Recall    : {metrics['recall']:.4f}")
+    print(f"F1-score  : {metrics['f1']:.4f}")
+    print(
+        f"ROC-AUC   : {metrics['roc_auc']:.4f}"
+        if metrics["roc_auc"] is not None
+        else "ROC-AUC   : None"
+    )
+    print("Confusion Matrix:")
+    print(np.array(metrics["confusion_matrix"]))
+
+
 def evaluate_rf():
     model = joblib.load(MODEL_DIR / "rf_model.pkl")
+    threshold = load_threshold(MODEL_DIR / "rf_threshold.json")
 
     X_test = np.load(WINFLAT_DIR / "X_test.npy")
-    y_test = np.load(WINFLAT_DIR / "y_test.npy")
+    y_test = np.load(WINFLAT_DIR / "y_test.npy").astype(int)
 
-    y_pred = model.predict(X_test)
     y_prob = model.predict_proba(X_test)[:, 1]
+    y_pred = (y_prob >= threshold).astype(int)
 
-    return compute_metrics(y_test, y_pred, y_prob)
+    return compute_metrics(y_test, y_pred, y_prob, threshold)
 
 
 def evaluate_xgb():
     model = joblib.load(MODEL_DIR / "xgb_model.pkl")
+    threshold = load_threshold(MODEL_DIR / "xgb_threshold.json")
 
     X_test = np.load(WINFLAT_DIR / "X_test.npy")
-    y_test = np.load(WINFLAT_DIR / "y_test.npy")
+    y_test = np.load(WINFLAT_DIR / "y_test.npy").astype(int)
 
-    y_pred = model.predict(X_test)
     y_prob = model.predict_proba(X_test)[:, 1]
+    y_pred = (y_prob >= threshold).astype(int)
 
-    return compute_metrics(y_test, y_pred, y_prob)
+    return compute_metrics(y_test, y_pred, y_prob, threshold)
 
 
 def evaluate_cnn_lstm():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    threshold = load_threshold(MODEL_DIR / "cnn_lstm_threshold.json")
 
     checkpoint = torch.load(MODEL_DIR / "cnn_lstm_model.pt", map_location=device)
 
@@ -122,7 +147,7 @@ def evaluate_cnn_lstm():
     model.eval()
 
     X_test = np.load(SEQ_DIR / "X_test.npy")
-    y_test = np.load(SEQ_DIR / "y_test.npy")
+    y_test = np.load(SEQ_DIR / "y_test.npy").astype(int)
 
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
 
@@ -130,20 +155,9 @@ def evaluate_cnn_lstm():
         logits = model(X_test_tensor)
         y_prob = torch.sigmoid(logits).cpu().numpy()
 
-    y_pred = (y_prob >= 0.5).astype(int)
+    y_pred = (y_prob >= threshold).astype(int)
 
-    return compute_metrics(y_test.astype(int), y_pred, y_prob)
-
-
-def print_metrics(name, metrics):
-    print(f"\n===== {name} =====")
-    print(f"Accuracy : {metrics['accuracy']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall   : {metrics['recall']:.4f}")
-    print(f"F1-score : {metrics['f1']:.4f}")
-    print(f"ROC-AUC  : {metrics['roc_auc']:.4f}" if metrics["roc_auc"] is not None else "ROC-AUC  : None")
-    print("Confusion Matrix:")
-    print(np.array(metrics["confusion_matrix"]))
+    return compute_metrics(y_test, y_pred, y_prob, threshold)
 
 
 def main():
@@ -159,6 +173,7 @@ def main():
         [
             {
                 "Model": "RandomForest",
+                "Threshold": rf_metrics["threshold"],
                 "Accuracy": rf_metrics["accuracy"],
                 "Precision": rf_metrics["precision"],
                 "Recall": rf_metrics["recall"],
@@ -167,6 +182,7 @@ def main():
             },
             {
                 "Model": "XGBoost",
+                "Threshold": xgb_metrics["threshold"],
                 "Accuracy": xgb_metrics["accuracy"],
                 "Precision": xgb_metrics["precision"],
                 "Recall": xgb_metrics["recall"],
@@ -175,6 +191,7 @@ def main():
             },
             {
                 "Model": "CNN-LSTM",
+                "Threshold": cnn_metrics["threshold"],
                 "Accuracy": cnn_metrics["accuracy"],
                 "Precision": cnn_metrics["precision"],
                 "Recall": cnn_metrics["recall"],
@@ -189,19 +206,19 @@ def main():
 
     comparison_df.to_csv(RESULT_DIR / "model_comparison.csv", index=False)
 
-    with open(RESULT_DIR / "rf_eval_metrics.json", "w", encoding="utf-8") as f:
+    with open(RESULT_DIR / "rf_test_metrics.json", "w", encoding="utf-8") as f:
         json.dump(rf_metrics, f, indent=4, ensure_ascii=False)
 
-    with open(RESULT_DIR / "xgb_eval_metrics.json", "w", encoding="utf-8") as f:
+    with open(RESULT_DIR / "xgb_test_metrics.json", "w", encoding="utf-8") as f:
         json.dump(xgb_metrics, f, indent=4, ensure_ascii=False)
 
-    with open(RESULT_DIR / "cnn_lstm_eval_metrics.json", "w", encoding="utf-8") as f:
+    with open(RESULT_DIR / "cnn_lstm_test_metrics.json", "w", encoding="utf-8") as f:
         json.dump(cnn_metrics, f, indent=4, ensure_ascii=False)
 
     print("\n[SAVED] artifacts/results/model_comparison.csv")
-    print("[SAVED] artifacts/results/rf_eval_metrics.json")
-    print("[SAVED] artifacts/results/xgb_eval_metrics.json")
-    print("[SAVED] artifacts/results/cnn_lstm_eval_metrics.json")
+    print("[SAVED] artifacts/results/rf_test_metrics.json")
+    print("[SAVED] artifacts/results/xgb_test_metrics.json")
+    print("[SAVED] artifacts/results/cnn_lstm_test_metrics.json")
 
 
 if __name__ == "__main__":

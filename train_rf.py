@@ -25,15 +25,12 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_data():
     X_train = np.load(DATA_DIR / "X_train.npy")
-    y_train = np.load(DATA_DIR / "y_train.npy")
+    y_train = np.load(DATA_DIR / "y_train.npy").astype(int)
 
     X_val = np.load(DATA_DIR / "X_val.npy")
-    y_val = np.load(DATA_DIR / "y_val.npy")
+    y_val = np.load(DATA_DIR / "y_val.npy").astype(int)
 
-    X_test = np.load(DATA_DIR / "X_test.npy")
-    y_test = np.load(DATA_DIR / "y_test.npy")
-
-    return X_train, y_train, X_val, y_val, X_test, y_test
+    return X_train, y_train, X_val, y_val
 
 
 def compute_metrics(y_true, y_pred, y_prob):
@@ -56,29 +53,58 @@ def compute_metrics(y_true, y_pred, y_prob):
     return metrics
 
 
+def pick_best_threshold(y_true, y_prob):
+    best = None
+    best_threshold = 0.5
+
+    for threshold in np.arange(0.05, 0.96, 0.01):
+        y_pred = (y_prob >= threshold).astype(int)
+        metrics = compute_metrics(y_true, y_pred, y_prob)
+
+        candidate = (
+            metrics["f1"],
+            metrics["recall"],
+            metrics["precision"],
+            -abs(threshold - 0.5),
+        )
+
+        if best is None or candidate > best:
+            best = candidate
+            best_threshold = float(round(threshold, 4))
+            best_metrics = metrics
+
+    best_metrics["selected_threshold"] = best_threshold
+    return best_threshold, best_metrics
+
+
 def print_metrics(name, metrics):
     print(f"\n===== {name} =====")
-    print(f"Accuracy : {metrics['accuracy']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall   : {metrics['recall']:.4f}")
-    print(f"F1-score : {metrics['f1']:.4f}")
-    print(f"ROC-AUC  : {metrics['roc_auc']:.4f}" if metrics["roc_auc"] is not None else "ROC-AUC  : None")
+    print(f"Threshold : {metrics.get('selected_threshold', 0.5):.2f}")
+    print(f"Accuracy  : {metrics['accuracy']:.4f}")
+    print(f"Precision : {metrics['precision']:.4f}")
+    print(f"Recall    : {metrics['recall']:.4f}")
+    print(f"F1-score  : {metrics['f1']:.4f}")
+    print(
+        f"ROC-AUC   : {metrics['roc_auc']:.4f}"
+        if metrics["roc_auc"] is not None
+        else "ROC-AUC   : None"
+    )
     print("Confusion Matrix:")
     print(np.array(metrics["confusion_matrix"]))
 
 
 def main():
-    X_train, y_train, X_val, y_val, X_test, y_test = load_data()
+    X_train, y_train, X_val, y_val = load_data()
 
     print("[INFO] X_train shape:", X_train.shape)
     print("[INFO] X_val shape  :", X_val.shape)
-    print("[INFO] X_test shape :", X_test.shape)
 
     model = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=None,
+        n_estimators=500,
+        max_depth=20,
         min_samples_split=2,
-        min_samples_leaf=1,
+        min_samples_leaf=2,
+        max_features="sqrt",
         class_weight="balanced_subsample",
         random_state=42,
         n_jobs=-1,
@@ -86,31 +112,22 @@ def main():
 
     model.fit(X_train, y_train)
 
-    # validation
-    val_pred = model.predict(X_val)
     val_prob = model.predict_proba(X_val)[:, 1]
-    val_metrics = compute_metrics(y_val, val_pred, val_prob)
-    print_metrics("RF Validation", val_metrics)
+    best_threshold, val_metrics = pick_best_threshold(y_val, val_prob)
 
-    # test
-    test_pred = model.predict(X_test)
-    test_prob = model.predict_proba(X_test)[:, 1]
-    test_metrics = compute_metrics(y_test, test_pred, test_prob)
-    print_metrics("RF Test", test_metrics)
+    print_metrics("RF Validation (Best Threshold)", val_metrics)
 
-    # save model
     joblib.dump(model, MODEL_DIR / "rf_model.pkl")
 
-    # save metrics
+    with open(MODEL_DIR / "rf_threshold.json", "w", encoding="utf-8") as f:
+        json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
+
     with open(RESULT_DIR / "rf_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(val_metrics, f, indent=4, ensure_ascii=False)
 
-    with open(RESULT_DIR / "rf_test_metrics.json", "w", encoding="utf-8") as f:
-        json.dump(test_metrics, f, indent=4, ensure_ascii=False)
-
     print("\n[SAVED] artifacts/models/rf_model.pkl")
+    print("[SAVED] artifacts/models/rf_threshold.json")
     print("[SAVED] artifacts/results/rf_val_metrics.json")
-    print("[SAVED] artifacts/results/rf_test_metrics.json")
 
 
 if __name__ == "__main__":
