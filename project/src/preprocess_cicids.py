@@ -4,6 +4,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from collections import Counter
 from sklearn.preprocessing import LabelEncoder
 from typing import Optional
 
@@ -11,7 +12,8 @@ from typing import Optional
 # =========================================================
 # 경로 설정
 # ---------------------------------------------------------
-# 프로젝트 루트 기준으로 원본 데이터 경로와 저장 경로를 정의한다.
+# __file__ 기준으로 두 단계 상위 디렉터리를 프로젝트 루트로 삼는다.
+# raw 데이터는 data/raw/cic-ids2017/, 전처리 결과는 data/processed/에 저장한다.
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -23,9 +25,9 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 # =========================================================
 # 내부 네트워크 대역 정의
 # ---------------------------------------------------------
-# Botnet 탐지는 감염된 내부 host의 반복적 통신 패턴을
-# sequence로 구성하는 것이 중요하므로, 내부 IP를 기준으로
-# host 단위의 flow sequence를 생성한다.
+# CIC-IDS2017 실험 환경에서 감염 대상이 되는 내부 호스트 대역이다.
+# sequence 생성 시 외부 IP(공격자, 외부 서버 등)는 제외하고
+# 내부 호스트 단위로만 행동 흐름을 구성한다.
 # =========================================================
 INTERNAL_IP_PREFIXES = (
     "192.168.",
@@ -34,11 +36,12 @@ INTERNAL_IP_PREFIXES = (
 
 
 # =========================================================
-# 공통 feature 정의
+# 모델 입력 feature 목록
 # ---------------------------------------------------------
-# RF / XGBoost / CNN-LSTM 모델에 공통으로 사용할 feature 목록이다.
-# TrafficLabeling 버전을 사용하는 이유는 Source IP와 Timestamp를
-# 포함하고 있어 sequence 기반 모델 구성이 가능하기 때문이다.
+# RF / XGBoost / CNN-LSTM 세 모델이 공통으로 사용하는 feature 집합이다.
+# CICFlowMeter가 출력하는 flow 수준 통계값으로 구성되어 있으며,
+# TrafficLabeling 버전을 기준으로 한다.
+# (MachineLearningCVE 버전은 Source IP / Timestamp가 없어 sequence 구성 불가)
 # =========================================================
 ML_FEATURES = [
     "Flow Duration",
@@ -122,10 +125,11 @@ ML_FEATURES = [
 
 
 # =========================================================
-# 필수 컬럼 정의
+# 필수 컬럼 목록
 # ---------------------------------------------------------
-# Source IP와 Timestamp는 sequence 구성에 필요하며,
-# 나머지 주요 컬럼은 데이터 정합성 확인을 위해 사용한다.
+# 파이프라인 실행 전 존재 여부를 검증할 컬럼이다.
+# Source IP / Timestamp는 sequence 구성에 반드시 필요하고,
+# 나머지는 데이터 정합성 확인 및 정제 단계에서 사용한다.
 # =========================================================
 REQUIRED_BASE_COLS = [
     "Source IP",
@@ -140,22 +144,50 @@ REQUIRED_BASE_COLS = [
 ]
 
 
+# =========================================================
+# 라벨 매핑 정의
+# ---------------------------------------------------------
+# Botnet으로 분류할 라벨만 명시적으로 정의하고,
+# 나머지는 모두 0(Normal)으로 처리한다.
+# 0으로 처리된 라벨은 _label_counter에 기록되어
+# 파이프라인 종료 후 분포를 확인할 수 있다.
+# =========================================================
+BOTNET_LABELS = {"bot", "botnet"}
+
+# 실행 중 등장한 모든 라벨의 빈도를 수집한다 (1=Botnet 포함)
+_label_counter: Counter = Counter()
+
+
+# =========================================================
+# CSV 로드
+# =========================================================
+
 def load_all_csv(raw_dir: str) -> pd.DataFrame:
     """
-    원본 CSV 파일 전체를 로드하여 하나의 DataFrame으로 병합한다.
+    디렉터리 내 모든 CSV 파일을 읽어 하나의 DataFrame으로 병합한다.
 
-    TrafficLabeling 버전은 날짜별 CSV 파일로 구성되어 있으며,
-    파일별 인코딩이 다를 수 있으므로 여러 인코딩을 순차적으로 시도한다.
+    CIC-IDS2017 TrafficLabeling 버전은 날짜별로 CSV가 분리되어 있고
+    파일마다 인코딩이 다를 수 있으므로, utf-8 → cp1252 → latin-1 순으로
+    인코딩을 순차 시도한다. 세 가지 모두 실패하거나 다른 오류가 발생하면
+    해당 파일에서 ValueError를 발생시키고 파이프라인을 중단한다.
 
     Parameters
     ----------
     raw_dir : str
-        원본 CSV 파일이 저장된 디렉터리 경로
+        CSV 파일이 위치한 디렉터리 경로
 
     Returns
     -------
-    df : pd.DataFrame
-        병합된 전체 DataFrame
+    pd.DataFrame
+        전체 CSV를 행 방향으로 이어 붙인 DataFrame.
+        인덱스는 0부터 재설정된다.
+
+    Raises
+    ------
+    FileNotFoundError
+        raw_dir에 CSV 파일이 하나도 없을 때
+    ValueError
+        특정 파일의 모든 인코딩 시도가 실패했을 때
     """
     csv_files = glob.glob(os.path.join(raw_dir, "*.csv"))
 
@@ -167,13 +199,26 @@ def load_all_csv(raw_dir: str) -> pd.DataFrame:
     df_list = []
     for file_path in csv_files:
         print(f"[LOAD] {os.path.basename(file_path)}")
+        temp_df = None
+
         for encoding in ["utf-8", "cp1252", "latin-1"]:
             try:
                 temp_df = pd.read_csv(file_path, low_memory=False, encoding=encoding)
                 print(f"       encoding: {encoding}")
                 break
             except UnicodeDecodeError:
+                # 다음 인코딩 후보로 넘어간다
                 continue
+            except Exception as e:
+                # UnicodeDecodeError 외의 오류(손상된 파일, 구분자 문제 등)는
+                # 재시도해도 의미가 없으므로 즉시 루프를 탈출한다
+                print(f"[WARN] {os.path.basename(file_path)} 로드 실패 ({encoding}): {e}")
+                break
+
+        # 모든 인코딩 시도가 실패한 경우 파이프라인을 중단한다
+        if temp_df is None:
+            raise ValueError(f"모든 인코딩 시도 실패: {file_path}")
+
         df_list.append(temp_df)
 
     df = pd.concat(df_list, ignore_index=True)
@@ -181,22 +226,25 @@ def load_all_csv(raw_dir: str) -> pd.DataFrame:
     return df
 
 
+# =========================================================
+# 컬럼명 정규화 / 검증
+# =========================================================
+
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
-    컬럼명 앞뒤 공백을 제거한다.
+    모든 컬럼명의 앞뒤 공백을 제거한다.
 
-    TrafficLabeling 데이터는 컬럼명에 공백이 포함된 경우가 있어
-    후속 컬럼 참조 오류를 방지하기 위해 정규화가 필요하다.
+    CICFlowMeter 출력 파일은 컬럼명에 선행·후행 공백이 포함된 경우가 있어
+    이후 컬럼 참조 시 KeyError가 발생할 수 있다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        원본 DataFrame
 
     Returns
     -------
-    df : pd.DataFrame
-        컬럼명이 정리된 DataFrame
+    pd.DataFrame
+        컬럼명이 strip된 DataFrame (원본 수정)
     """
     df.columns = df.columns.str.strip()
     return df
@@ -204,33 +252,41 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
 
 def validate_columns(df: pd.DataFrame) -> None:
     """
-    필수 컬럼 존재 여부를 검증한다.
+    REQUIRED_BASE_COLS에 정의된 필수 컬럼이 모두 존재하는지 검증한다.
+
+    파이프라인 초반에 호출하여 후속 단계에서 KeyError가 발생하는 상황을 방지한다.
+    하나라도 누락된 컬럼이 있으면 즉시 ValueError를 발생시킨다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        검증 대상 DataFrame
 
     Raises
     ------
     ValueError
-        필수 컬럼이 하나라도 누락된 경우 발생
+        누락된 필수 컬럼이 하나 이상 있을 때
     """
     missing = [col for col in REQUIRED_BASE_COLS if col not in df.columns]
     if missing:
         raise ValueError(f"필수 컬럼이 없습니다: {missing}")
 
 
+# =========================================================
+# 상태 로깅 유틸리티
+# =========================================================
+
 def log_inf_nan_status(df: pd.DataFrame, stage: str) -> None:
     """
-    수치형 컬럼 기준 NaN / inf 현황을 출력한다.
+    수치형 컬럼의 NaN / inf 개수를 출력한다.
+
+    전처리 전·후 등 여러 시점에서 호출하여 데이터 품질 변화를 추적하는 용도이다.
+    NaN과 inf가 없는 컬럼은 출력하지 않는다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        확인 대상 DataFrame
     stage : str
-        출력 시점 식별 문자열
+        출력 시점을 구분하는 식별자 (예: "before_cleaning", "after_inf_to_nan")
     """
     numeric_cols = df.select_dtypes(include=[np.number]).columns
 
@@ -255,18 +311,23 @@ def log_inf_nan_status(df: pd.DataFrame, stage: str) -> None:
 
 def log_label_distribution(df: pd.DataFrame, stage: str) -> None:
     """
-    라벨 분포를 출력한다.
+    Label 컬럼의 클래스 분포를 출력한다.
+
+    정제 전·후 라벨 변화(행 제거로 인한 클래스 소실 등)를 확인하는 용도이다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        확인 대상 DataFrame
     stage : str
-        출력 시점 식별 문자열
+        출력 시점 식별자 (예: "before_cleaning", "after_cleaning")
     """
     print(f"\n[LABEL DIST:{stage}]")
     print(df["Label"].value_counts(dropna=False))
 
+
+# =========================================================
+# 기본 정제
+# =========================================================
 
 def basic_cleaning(
     df: pd.DataFrame,
@@ -274,27 +335,30 @@ def basic_cleaning(
     drop_bad_timestamp: bool = True,
 ) -> pd.DataFrame:
     """
-    CIC-IDS2017 TrafficLabeling 데이터의 기본 정제를 수행한다.
+    원시 데이터에 대한 기본 정제를 수행한다.
 
-    수행 내용:
-    - 문자열 컬럼 공백 제거
-    - Timestamp를 datetime으로 변환
-    - Timestamp / Label / Source IP 결측 처리
-    - inf 값을 NaN으로 변환
-    - 수치형 NaN 값을 0으로 대체
+    수행 순서:
+    1. 문자열 컬럼 공백 제거
+    2. Timestamp → datetime 변환 (day-first, mixed format)
+    3. Timestamp 파싱 실패 행 제거 또는 forward-fill
+    4. Label / Source IP 결측 및 빈 문자열 행 제거
+    5. 수치형 inf → NaN 변환
+    6. 수치형 NaN → 0 대체 (옵션)
 
     Parameters
     ----------
     df : pd.DataFrame
-        원본 병합 DataFrame
+        병합된 원시 DataFrame
     fill_numeric_na_with_zero : bool, default=True
-        수치형 NaN 값을 0으로 대체할지 여부
+        True이면 수치형 NaN을 0으로 대체한다.
+        False이면 NaN을 그대로 유지한다 (모델이 직접 처리해야 함).
     drop_bad_timestamp : bool, default=True
-        Timestamp 파싱 실패 행을 제거할지 여부
+        True이면 Timestamp 파싱 실패 행을 제거한다.
+        False이면 앞 행의 값으로 forward-fill한다.
 
     Returns
     -------
-    df : pd.DataFrame
+    pd.DataFrame
         정제 완료된 DataFrame
     """
     before_rows = len(df)
@@ -303,12 +367,14 @@ def basic_cleaning(
     log_label_distribution(df, "before_cleaning")
     log_inf_nan_status(df, "before_cleaning")
 
-    # 문자열 컬럼의 불필요한 공백 제거
+    # 1. 문자열 컬럼 공백 제거
     object_cols = df.select_dtypes(include=["object"]).columns
     for col in object_cols:
         df[col] = df[col].astype(str).str.strip()
 
-    # Timestamp를 day-first 형식으로 파싱
+    # 2. Timestamp 파싱
+    # CIC-IDS2017은 날짜가 day-first(DD/MM/YYYY) 형식이며
+    # 파일마다 포맷이 미묘하게 달라 format="mixed"로 처리한다
     df["Timestamp"] = pd.to_datetime(
         df["Timestamp"],
         errors="coerce",
@@ -319,24 +385,26 @@ def basic_cleaning(
     parsed_timestamp_na = df["Timestamp"].isna().sum()
     print(f"\n[CLEAN] Timestamp 전체 NaT 행 수: {parsed_timestamp_na:,}")
 
-    # Timestamp 정합성을 유지하기 위해 파싱 실패 행은 제거하거나 보간한다
+    # 3. Timestamp 파싱 실패 처리
     if drop_bad_timestamp:
         before_ts_drop = len(df)
         df = df.dropna(subset=["Timestamp"])
         after_ts_drop = len(df)
         print(f"[CLEAN] Timestamp NaT 제거 행 수: {before_ts_drop - after_ts_drop:,}")
     else:
+        # 제거 대신 직전 유효 Timestamp로 채운다
         df["Timestamp"] = df["Timestamp"].ffill()
         remain_nat = df["Timestamp"].isna().sum()
         print(f"[CLEAN] Timestamp ffill 후 남은 NaT 행 수: {remain_nat:,}")
 
-    # 필수 식별 컬럼 결측 제거
+    # 4. Label / Source IP 결측 및 빈 문자열 제거
+    # Label이 없으면 라벨링 자체가 불가능하고,
+    # Source IP가 없으면 host 단위 sequence를 구성할 수 없다
     before_required_drop = len(df)
     df = df.dropna(subset=["Label", "Source IP"])
     after_required_drop = len(df)
     print(f"[CLEAN] Label/Source IP 결측 제거 행 수: {before_required_drop - after_required_drop:,}")
 
-    # 빈 문자열 형태의 결측도 제거
     before_empty_drop = len(df)
     df = df[
         (df["Label"].astype(str).str.strip() != "")
@@ -345,7 +413,8 @@ def basic_cleaning(
     after_empty_drop = len(df)
     print(f"[CLEAN] Label/Source IP 빈 문자열 제거 행 수: {before_empty_drop - after_empty_drop:,}")
 
-    # 수치형 inf 값을 NaN으로 변환
+    # 5. inf → NaN 변환
+    # CICFlowMeter는 Flow Bytes/s 등에서 division-by-zero로 inf를 출력할 수 있다
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     inf_before = 0
     if len(numeric_cols) > 0:
@@ -361,7 +430,10 @@ def basic_cleaning(
 
     log_inf_nan_status(df, "after_inf_to_nan")
 
-    # 모델 입력을 위해 수치형 NaN을 0으로 대체
+    # 6. 수치형 NaN → 0 대체
+    # RF / XGBoost / CNN-LSTM 모두 NaN 입력을 허용하지 않으므로
+    # 기본값 0으로 채운다. 도메인 지식상 해당 기능이 측정되지 않은 것을
+    # 0(활동 없음)으로 해석하는 것이 자연스럽다.
     if fill_numeric_na_with_zero:
         nan_before_fill = df[numeric_cols_after_replace].isna().sum().sum()
         df[numeric_cols_after_replace] = df[numeric_cols_after_replace].fillna(0)
@@ -373,7 +445,6 @@ def basic_cleaning(
         print("[CLEAN] 수치형 NaN을 0으로 대체하지 않음")
 
     after_rows = len(df)
-
     print(f"\n[CLEAN] 제거된 전체 행 수: {before_rows - after_rows:,}")
     print(f"[CLEAN] 정제 후 shape: {df.shape}")
 
@@ -383,41 +454,98 @@ def basic_cleaning(
     return df
 
 
-def create_binary_label(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Botnet 탐지를 위한 이진 라벨을 생성한다.
+# =========================================================
+# 이진 라벨 생성
+# =========================================================
 
-    Label에 'bot'이 포함되면 1(Botnet),
-    그 외 모든 클래스는 0(Non-Botnet)으로 변환한다.
+def _map_binary_label(label: str, strict: bool = False) -> int:
+    """
+    단일 라벨 문자열을 이진 정수(0 또는 1)로 변환하는 내부 매핑 함수.
+
+    BOTNET_LABELS에 속하면 1, 그 외는 모두 0으로 처리한다.
+    0으로 처리된 라벨은 _label_counter에 기록되어
+    create_binary_label 종료 시 분포를 확인할 수 있다.
+
+    strict=True이면 BOTNET_LABELS에 없는 라벨에서 즉시 ValueError를 발생시킨다.
+    데이터셋을 처음 파악할 때 사용하고, 실험 단계에서는 False로 둔다.
+
+    Parameters
+    ----------
+    label : str
+        원본 Label 컬럼의 단일 값
+    strict : bool, default=False
+        True이면 미등록 라벨에서 예외 발생, False이면 0으로 처리 후 기록
+
+    Returns
+    -------
+    int
+        1 (Botnet) 또는 0 (Normal)
+
+    Raises
+    ------
+    ValueError
+        strict=True이고 BOTNET_LABELS에 없는 라벨일 때
+    """
+    label = str(label).strip().lower()
+
+    if label in BOTNET_LABELS:
+        return 1
+
+    # Botnet이 아닌 모든 라벨은 0으로 처리하되 카운터에 기록한다
+    _label_counter[label] += 1
+    if strict:
+        raise ValueError(f"알 수 없는 라벨 값: '{label}'")
+    return 0
+
+
+def create_binary_label(df: pd.DataFrame, strict: bool = False) -> pd.DataFrame:
+    """
+    Label 컬럼을 기반으로 이진 라벨 컬럼(Label_binary)을 생성한다.
+
+    BOTNET_LABELS에 해당하면 1, 나머지는 모두 0으로 처리한다.
+    0으로 처리된 라벨 목록은 _label_counter를 통해 파이프라인 종료 후 확인 가능하다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        정제 완료된 DataFrame
+        basic_cleaning이 완료된 DataFrame
+    strict : bool, default=False
+        True이면 미등록 라벨 등장 시 즉시 예외 발생 (데이터 구조 파악용)
+        False이면 0으로 처리 후 카운터에 기록 (실험/학습용)
 
     Returns
     -------
-    df : pd.DataFrame
+    pd.DataFrame
         Label_binary 컬럼이 추가된 DataFrame
     """
-    df["Label_binary"] = df["Label"].astype(str).str.lower().apply(
-        lambda x: 1 if "bot" in x else 0
+    df["Label_binary"] = df["Label"].map(
+        lambda x: _map_binary_label(x, strict=strict)
     )
 
-    print("[LABEL] Label 분포:")
-    print(df["Label"].value_counts())
+    print("[LABEL] 0으로 처리된 라벨 분포 (Non-Botnet):")
+    for label, count in _label_counter.most_common():
+        print(f"  '{label}': {count:,}건")
+
     print("\n[LABEL] Label_binary 분포:")
     print(df["Label_binary"].value_counts())
 
     return df
 
 
+# =========================================================
+# Protocol 인코딩
+# =========================================================
+
 def encode_protocol(df: pd.DataFrame) -> tuple[pd.DataFrame, Optional[LabelEncoder]]:
     """
-    Protocol 값을 정수형으로 변환한다.
+    Protocol 컬럼을 정수형(int32)으로 변환한다.
 
-    Protocol은 원래 숫자 의미를 가지므로,
-    가능하면 원래 값을 유지하는 방향으로 처리한다.
+    Protocol은 IANA 프로토콜 번호(TCP=6, UDP=17 등)를 의미하는 수치형 값이므로
+    LabelEncoder를 사용하지 않고 원래 숫자 값을 그대로 유지한다.
+    숫자로 변환할 수 없는 값(문자열 등)은 -1로 채운다.
+
+    현재 LabelEncoder를 사용하지 않으므로 두 번째 반환값은 항상 None이다.
+    다른 데이터셋과의 인터페이스 일관성을 위해 반환 시그니처는 유지한다.
 
     Parameters
     ----------
@@ -427,9 +555,9 @@ def encode_protocol(df: pd.DataFrame) -> tuple[pd.DataFrame, Optional[LabelEncod
     Returns
     -------
     df : pd.DataFrame
-        Protocol 컬럼이 정수형으로 변환된 DataFrame
-    protocol_encoder : Optional[LabelEncoder]
-        현재 구현에서는 사용하지 않으므로 None 반환
+        Protocol 컬럼이 int32로 변환된 DataFrame
+    None
+        LabelEncoder 미사용 (인터페이스 일관성용 자리 표시자)
     """
     df["Protocol"] = pd.to_numeric(df["Protocol"], errors="coerce")
 
@@ -444,53 +572,76 @@ def encode_protocol(df: pd.DataFrame) -> tuple[pd.DataFrame, Optional[LabelEncod
     return df, None
 
 
+# =========================================================
+# 시간 정렬
+# =========================================================
+
 def sort_by_time(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Timestamp 기준으로 전체 데이터를 시간순 정렬한다.
+    Timestamp 오름차순으로 전체 데이터를 정렬한다.
+
+    여러 CSV를 병합하면 날짜 순서가 뒤섞일 수 있으므로
+    sequence 생성 전에 전역 시간 순서를 보장한다.
+    각 host 내부 정렬은 create_sequences에서 별도로 수행한다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Timestamp 컬럼을 포함한 DataFrame
 
     Returns
     -------
-    df : pd.DataFrame
-        Timestamp 기준으로 정렬된 DataFrame
+    pd.DataFrame
+        Timestamp 오름차순으로 정렬된 DataFrame. 인덱스는 재설정된다.
     """
     df = df.sort_values("Timestamp").reset_index(drop=True)
     print("[ORDER] Timestamp 기준 시간 정렬 완료")
     return df
 
 
+# =========================================================
+# 내부 IP 판별
+# =========================================================
+
 def is_internal_ip(ip: str) -> bool:
     """
-    입력 IP가 내부 네트워크 대역인지 판별한다.
+    IP 주소가 INTERNAL_IP_PREFIXES에 정의된 내부 네트워크 대역인지 판별한다.
 
     Parameters
     ----------
     ip : str
-        확인할 IP 주소
+        확인할 IP 주소 문자열
 
     Returns
     -------
     bool
-        내부 IP 대역이면 True, 아니면 False
+        내부 대역이면 True, 아니면 False
     """
     return str(ip).startswith(INTERNAL_IP_PREFIXES)
 
 
+# =========================================================
+# flow 분포 분석
+# =========================================================
+
 def analyze_flow_distribution(df: pd.DataFrame) -> None:
     """
-    Source IP 기준 flow 수 분포를 분석한다.
+    Source IP 기준 flow 수 분포를 분석하고 적절한 window_size 후보를 제안한다.
 
-    전체 분포와 내부 IP 분포를 각각 확인하여
-    sequence 구성에 사용할 window size 결정의 근거로 활용한다.
+    내부 IP 호스트의 flow 수 중앙값을 기준으로 window_size 권장값을 산출한다.
+    결과는 출력만 하며 파이프라인에 자동 반영하지 않는다.
+    (window_size는 모델 성능·클래스 불균형·sequence 의미 보존을 함께 고려해야 하므로
+    실험자가 직접 결정하는 방식을 유지한다)
+
+    권장값 산출 기준:
+        중앙값 < 5  → window_size = 3
+        중앙값 < 20 → window_size = 5
+        중앙값 < 50 → window_size = 10
+        그 외        → window_size = 15
 
     Parameters
     ----------
     df : pd.DataFrame
-        전처리 완료된 DataFrame
+        Label_binary 컬럼이 포함된 전처리 완료 DataFrame
     """
     all_counts = df.groupby("Source IP").size()
 
@@ -534,15 +685,19 @@ def analyze_flow_distribution(df: pd.DataFrame) -> None:
     print(f"[FLOW DIST] → 실험 후보: {', '.join(map(str, candidates))}")
 
 
+# =========================================================
+# flat 데이터 생성 (RF / XGBoost)
+# =========================================================
+
 def create_flat_data(
     df: pd.DataFrame,
     feature_cols: list[str],
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    RF / XGBoost용 flat 데이터를 생성한다.
+    RF / XGBoost 학습용 2D feature 배열을 생성한다.
 
-    단일 flow 기반 분류를 위해 전체 데이터를 그대로 사용하며,
-    sequence 구성 없이 feature 행렬과 라벨 벡터를 반환한다.
+    sequence를 구성하지 않고 각 flow를 독립적인 샘플로 취급한다.
+    feature_cols 중 실제로 존재하지 않는 컬럼은 경고 후 스킵한다.
 
     Parameters
     ----------
@@ -553,12 +708,10 @@ def create_flat_data(
 
     Returns
     -------
-    X : np.ndarray
-        shape = (n_samples, n_features)
-        단일 flow 기반 입력 feature 배열
-    y : np.ndarray
-        shape = (n_samples,)
-        각 flow의 이진 라벨 배열
+    X : np.ndarray, shape (n_samples, n_features), dtype float32
+        단일 flow 기반 feature 행렬
+    y : np.ndarray, shape (n_samples,), dtype int32
+        각 flow의 이진 라벨 (0=Normal, 1=Botnet)
     """
     valid_cols = [col for col in feature_cols if col in df.columns]
     missing_cols = [col for col in feature_cols if col not in df.columns]
@@ -577,6 +730,10 @@ def create_flat_data(
     return X, y
 
 
+# =========================================================
+# sequence 데이터 생성 (CNN-LSTM)
+# =========================================================
+
 def create_sequences(
     df: pd.DataFrame,
     feature_cols: list[str],
@@ -584,14 +741,15 @@ def create_sequences(
     step_size: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    CNN-LSTM 입력용 sequence 데이터를 생성한다.
+    CNN-LSTM 학습용 3D sequence 배열을 생성한다.
 
-    내부 IP 기준으로 flow를 그룹화한 뒤 Timestamp 순으로 정렬하고,
-    sliding window를 적용하여 host 단위의 연속적인 행동 흐름을 sequence로 구성한다.
+    내부 IP 호스트별로 flow를 Timestamp 순으로 정렬한 뒤
+    sliding window를 적용하여 호스트 단위 행동 흐름을 sequence로 구성한다.
+    flow 수가 window_size에 미치지 못하는 호스트는 sequence를 생성하지 않는다.
 
     라벨링 기준:
-    - window 내 Botnet flow가 하나라도 존재하면 sequence label = 1
-    - 그렇지 않으면 sequence label = 0
+        window 내 Botnet flow가 1개 이상 → sequence label = 1
+        window 내 모두 Normal          → sequence label = 0
 
     Parameters
     ----------
@@ -600,19 +758,16 @@ def create_sequences(
     feature_cols : list[str]
         sequence 입력에 사용할 feature 컬럼 목록
     window_size : int, default=15
-        하나의 sequence를 구성하는 flow 개수
+        sequence 하나를 구성하는 연속 flow 개수
     step_size : int, default=5
-        sliding window 이동 간격
+        sliding window 이동 간격 (step_size < window_size이면 overlap 발생)
 
     Returns
     -------
-    X : np.ndarray
-        shape = (n_sequences, window_size, n_features)
-        CNN-LSTM 입력용 sequence feature 배열
-    y : np.ndarray
-        shape = (n_sequences,)
-        각 sequence에 대한 이진 라벨 배열
-        (0 = Normal, 1 = Botnet)
+    X : np.ndarray, shape (n_sequences, window_size, n_features), dtype float32
+        CNN-LSTM 입력 sequence 배열
+    y : np.ndarray, shape (n_sequences,), dtype int32
+        각 sequence의 이진 라벨 (0=Normal, 1=Botnet)
     """
     valid_cols = [col for col in feature_cols if col in df.columns]
     missing_cols = [col for col in feature_cols if col not in df.columns]
@@ -620,7 +775,7 @@ def create_sequences(
     if missing_cols:
         print(f"[WARN] sequence 생성에서 없는 컬럼 (스킵): {missing_cols}")
 
-    # 내부 IP만 선택하여 host 단위 sequence 구성
+    # 외부 IP(공격자 서버 등)는 감염 호스트 관점의 행동 패턴을 담지 않으므로 제외
     internal_mask = df["Source IP"].apply(is_internal_ip)
     df_internal = df[internal_mask].copy()
 
@@ -634,25 +789,20 @@ def create_sequences(
     grouped = df_internal.groupby("Source IP")
 
     for src_ip, group in grouped:
-        # 각 host의 flow를 시간 순으로 정렬
         group = group.sort_values("Timestamp").reset_index(drop=True)
 
         features = group[valid_cols].values
         label_vals = group["Label_binary"].values
         n_flows = len(features)
 
-        # sequence 길이보다 짧은 host는 제외
         if n_flows < window_size:
             skipped += 1
             continue
 
-        # sliding window 기반 sequence 생성
         for start in range(0, n_flows - window_size + 1, step_size):
             end = start + window_size
             seq = features[start:end]
             seq_labels = label_vals[start:end]
-
-            # window 내 Botnet flow가 하나라도 존재하면 Botnet sequence로 라벨링
             seq_label = 1 if seq_labels.sum() > 0 else 0
 
             sequences.append(seq)
@@ -673,24 +823,26 @@ def create_sequences(
     return X, y
 
 
+# =========================================================
+# 저장
+# =========================================================
+
 def save_outputs(
     df: pd.DataFrame,
     protocol_encoder: Optional[LabelEncoder],
     save_dir: str,
 ) -> None:
     """
-    전처리 결과 DataFrame과 부가 정보를 저장한다.
+    전처리 완료 DataFrame을 parquet 형식으로 저장한다.
 
-    저장 항목:
-    - cicids2017_traffic.parquet
-    - protocol_label_encoder.pkl (필요한 경우)
+    저장 컬럼: Source IP, Timestamp, Label, Label_binary + ML_FEATURES 교집합.
+    protocol_encoder가 None이 아닌 경우(LabelEncoder 사용 시) pkl로 함께 저장한다.
+    현재 구현에서는 Protocol 원값을 유지하므로 encoder는 저장하지 않는다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        저장할 전처리 결과 DataFrame
     protocol_encoder : Optional[LabelEncoder]
-        Protocol 인코더 객체
     save_dir : str
         저장 디렉터리 경로
     """
@@ -723,32 +875,39 @@ def save_numpy(
     name: str,
 ) -> None:
     """
-    numpy 배열 형태의 입력 데이터와 라벨을 저장한다.
+    numpy 배열 쌍(X, y)을 .npy 파일로 저장한다.
+
+    저장 파일명: X_{name}.npy, y_{name}.npy
 
     Parameters
     ----------
     data : np.ndarray
-        저장할 입력 배열
+        입력 feature 배열
     label : np.ndarray
-        저장할 라벨 배열
+        라벨 배열
     save_dir : str
         저장 디렉터리 경로
     name : str
-        파일명 식별자
+        파일명 식별자 (예: "flat", "seq_w15")
     """
     np.save(os.path.join(save_dir, f"X_{name}.npy"), data)
     np.save(os.path.join(save_dir, f"y_{name}.npy"), label)
     print(f"[SAVE] X_{name}.npy / y_{name}.npy 저장 완료")
 
 
+# =========================================================
+# 미리보기
+# =========================================================
+
 def preview_data(df: pd.DataFrame) -> None:
     """
-    전처리 결과의 일부 샘플과 전체 shape를 출력한다.
+    전처리 결과의 주요 컬럼 상위 5행과 전체 shape를 출력한다.
+
+    파이프라인 실행 중 중간 결과를 눈으로 빠르게 확인하는 용도이다.
 
     Parameters
     ----------
     df : pd.DataFrame
-        미리보기 대상 DataFrame
     """
     print("\n[PREVIEW] 상위 5행")
     print(df[["Source IP", "Timestamp", "Label", "Label_binary",
@@ -756,18 +915,24 @@ def preview_data(df: pd.DataFrame) -> None:
     print(f"\n[PREVIEW] 전체 shape: {df.shape}")
 
 
+# =========================================================
+# 메인 파이프라인
+# =========================================================
+
 def main():
     """
-    전처리 파이프라인 전체를 실행한다.
+    전처리 파이프라인 전체를 순서대로 실행한다.
 
     수행 순서:
-    1. CSV 로드 및 컬럼 정리
-    2. 데이터 정제
-    3. 이진 라벨 생성
-    4. Protocol 처리 및 시간 정렬
-    5. 전처리 결과 저장
-    6. flow 분포 분석
-    7. flat 데이터 및 sequence 데이터 생성/저장
+    1. CSV 로드 및 컬럼 정규화
+    2. 필수 컬럼 검증
+    3. 기본 정제 (결측·inf·Timestamp 처리)
+    4. 이진 라벨 생성
+    5. Protocol 정수 변환 및 시간 정렬
+    6. 전처리 결과 parquet 저장
+    7. flow 분포 분석 (window_size 결정 참고용)
+    8. flat 데이터 생성 및 저장 (RF / XGBoost)
+    9. sequence 데이터 생성 및 저장 (CNN-LSTM)
     """
     print("=== CIC-IDS2017 TrafficLabeling Preprocessing Start ===")
     print(f"[PATH] RAW_DIR : {RAW_DIR}")
@@ -789,7 +954,7 @@ def main():
         drop_bad_timestamp=True,
     )
 
-    df = create_binary_label(df)
+    df = create_binary_label(df, strict=False)  # 데이터 파악 중이면 strict=True로 변경
     df, protocol_encoder = encode_protocol(df)
     df = sort_by_time(df)
 
