@@ -18,7 +18,8 @@ from typing import Optional
 # __file__ 기준으로 두 단계 상위 디렉터리를 프로젝트 루트로 삼는다.
 # raw 데이터는 data/raw/cic-ids2017/, 전처리 결과는 data/processed/에 저장한다.
 # =========================================================
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC_DIR  = os.path.dirname(os.path.abspath(__file__))   # .../project/src
+BASE_DIR  = os.path.dirname(_SRC_DIR)                    # .../project
 
 RAW_DIR  = os.path.join(BASE_DIR, "data", "raw", "cic-ids2017")
 SAVE_DIR = os.path.join(BASE_DIR, "data", "processed")
