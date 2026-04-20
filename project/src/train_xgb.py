@@ -3,7 +3,6 @@ from pathlib import Path
 
 import joblib
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -13,6 +12,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from xgboost import XGBClassifier
 
 
 DATA_DIR = Path("data/processed/winflat")
@@ -99,35 +99,49 @@ def main():
     print("[INFO] X_train shape:", X_train.shape)
     print("[INFO] X_val shape  :", X_val.shape)
 
-    model = RandomForestClassifier(
-        n_estimators=500,
-        max_depth=20,
-        min_samples_split=2,
-        min_samples_leaf=2,
-        max_features="sqrt",
-        class_weight="balanced_subsample",
+    pos_count = np.sum(y_train == 1)
+    neg_count = np.sum(y_train == 0)
+    scale_pos_weight = float(neg_count / pos_count) if pos_count > 0 else 1.0
+
+    print(f"[INFO] scale_pos_weight: {scale_pos_weight:.4f}")
+
+    model = XGBClassifier(
+        n_estimators=1000,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        objective="binary:logistic",
+        eval_metric="logloss",
         random_state=42,
         n_jobs=-1,
+        scale_pos_weight=scale_pos_weight,
+        early_stopping_rounds=50,
     )
 
-    model.fit(X_train, y_train)
+    model.fit(
+        X_train,
+        y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+    )
 
     val_prob = model.predict_proba(X_val)[:, 1]
     best_threshold, val_metrics = pick_best_threshold(y_val, val_prob)
 
-    print_metrics("RF Validation (Best Threshold)", val_metrics)
+    print_metrics("XGBoost Validation (Best Threshold)", val_metrics)
 
-    joblib.dump(model, MODEL_DIR / "rf_model.pkl")
+    joblib.dump(model, MODEL_DIR / "xgb_model.pkl")
 
-    with open(MODEL_DIR / "rf_threshold.json", "w", encoding="utf-8") as f:
+    with open(MODEL_DIR / "xgb_threshold.json", "w", encoding="utf-8") as f:
         json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
 
-    with open(RESULT_DIR / "rf_val_metrics.json", "w", encoding="utf-8") as f:
+    with open(RESULT_DIR / "xgb_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(val_metrics, f, indent=4, ensure_ascii=False)
 
-    print("\n[SAVED] artifacts/models/rf_model.pkl")
-    print("[SAVED] artifacts/models/rf_threshold.json")
-    print("[SAVED] artifacts/results/rf_val_metrics.json")
+    print("\n[SAVED] artifacts/models/xgb_model.pkl")
+    print("[SAVED] artifacts/models/xgb_threshold.json")
+    print("[SAVED] artifacts/results/xgb_val_metrics.json")
 
 
 if __name__ == "__main__":
