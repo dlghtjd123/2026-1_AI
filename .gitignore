@@ -1,0 +1,105 @@
+<<<<<<< HEAD
+# Python
+=======
+# =========================
+# Python
+# =========================
+>>>>>>> eo
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+<<<<<<< HEAD
+# Virtual environment
+=======
+# =========================
+# Virtual environment
+# =========================
+>>>>>>> eo
+.venv/
+venv/
+env/
+
+<<<<<<< HEAD
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / Editor
+=======
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# OS / Editor
+# =========================
+>>>>>>> eo
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+<<<<<<< HEAD
+# Logs
+*.log
+
+# Data
+data/raw/
+data/interim/
+data/processed/
+
+# Model / artifacts
+*.pkl
+*.joblib
+*.npy
+*.npz
+*.pt
+*.pth
+
+# Temporary
+=======
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Data
+# =========================
+# raw 데이터는 너무 크니까 제외
+data/raw/
+
+# 중간 데이터도 제외
+data/interim/
+
+# processed는 구조만 유지하고 파일만 제외
+data/processed/*
+!data/processed/.gitkeep
+
+# =========================
+# Artifacts (모델, 결과)
+# =========================
+artifacts/models/*
+artifacts/results/*
+!artifacts/.gitkeep
+
+# =========================
+# ML / DL 파일
+# =========================
+*.pkl
+*.joblib
+*.pt
+*.pth
+
+# numpy 데이터 (용량 큼)
+*.npy
+*.npz
+
+# =========================
+# Temporary
+# =========================
+>>>>>>> eo
+tmp/
+temp/
