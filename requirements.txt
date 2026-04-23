@@ -6,26 +6,17 @@ pandas==2.2.2
 scikit-learn==1.4.2
 xgboost==2.0.3
 
-<<<<<<< HEAD
 # Deep Learning (CPU 기준)
 torch==2.2.2
-=======
+
 # Deep Learning (CUDA 12.4)
 # pip install torch --index-url https://download.pytorch.org/whl/cu124
-
-# GPU (XGBoost용)
-# pip install cupy-cuda12x
->>>>>>> eo
 
 # Utils
 joblib==1.4.2
 tqdm==4.66.4
 pyarrow==16.1.0
 
-<<<<<<< HEAD
-# Visualization (선택 but 추천)
-=======
 # Visualization
->>>>>>> eo
 matplotlib==3.8.4
 seaborn==0.13.2
