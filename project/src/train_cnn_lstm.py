@@ -285,6 +285,7 @@ def main():
         {
             "model_state_dict": model.state_dict(),
             "n_features":    n_features,
+            "window_size":   X_train.shape[1],  # sequence length
             "conv_channels": 64,
             "lstm_hidden":   64,
             "dropout":       0.3,

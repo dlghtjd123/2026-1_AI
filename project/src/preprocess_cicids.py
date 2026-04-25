@@ -640,30 +640,7 @@ def _build_windows_for_group(
     return windows, labels
 
 
-# =========================================================
-# flat 데이터 생성 (RF / XGBoost - flow 단위)
-# =========================================================
 
-def create_flat_data(
-    df: pd.DataFrame,
-    feature_cols: list[str],
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    RF / XGBoost 학습용 flow 단위 2D feature 배열을 생성한다.
-
-    트리 계열 모델은 feature scaling이 필요 없으므로 raw 값을 그대로 반환한다.
-    """
-    valid_cols   = [col for col in feature_cols if col in df.columns]
-    missing_cols = [col for col in feature_cols if col not in df.columns]
-
-    if missing_cols:
-        print(f"[WARN] flat 데이터에서 없는 컬럼 (스킵): {missing_cols}")
-
-    X = df[valid_cols].values.astype(np.float32)
-    y = df["Label_binary"].values.astype(np.int32)
-
-    print(f"\n[FLAT] X shape: {X.shape}  Botnet 비율: {y.mean():.4f}  ({y.sum():,}/{len(y):,})")
-    return X, y
 
 
 # =========================================================
@@ -880,49 +857,57 @@ def save_split_stats(
     y_seq_train: np.ndarray,
     y_seq_val: np.ndarray,
     y_seq_test: np.ndarray,
+    y_win_c_train: np.ndarray,
+    y_win_c_val: np.ndarray,
+    y_win_c_test: np.ndarray,
+    y_seq_c_train: np.ndarray,
+    y_seq_c_val: np.ndarray,
+    y_seq_c_test: np.ndarray,
     save_dir: str,
 ) -> None:
     """
-    split별 flow 단위 및 window 단위 클래스 불균형 통계를 JSON으로 저장한다.
+    split별 클래스 불균형 통계를 JSON으로 저장한다.
 
-    저장 내용:
-    - flow_level: split별 전체 flow 수, Botnet flow 수, Botnet 비율
-    - window_flat: split별 전체 window 수, Botnet window 수, Botnet 비율
-    - seq: split별 전체 sequence 수, Botnet sequence 수, Botnet 비율
-
-    Parameters
-    ----------
-    df_train, df_val, df_test : pd.DataFrame
-        split_host_groups()로 분리된 subset DataFrame
-    y_win_* : np.ndarray
-        create_window_flat_data()가 반환한 window 단위 라벨
-    y_seq_* : np.ndarray
-        create_sequences()가 반환한 sequence 단위 라벨
-    save_dir : str
+    ML_FEATURES(77개)와 COMMON_FEATURES(8개) 기준 모두 저장한다.
+    WGAN-GP 증강 전 baseline 수치로 사용된다.
     """
-    def _stats(df: pd.DataFrame, y_win: np.ndarray, y_seq: np.ndarray) -> dict:
+    def _stats(df, y_win, y_seq, y_win_c, y_seq_c) -> dict:
         return {
             "flow_level": {
                 "total":        int(len(df)),
                 "botnet":       int(df["Label_binary"].sum()),
                 "botnet_ratio": float(df["Label_binary"].mean()),
             },
-            "window_flat": {
-                "total":        int(len(y_win)),
-                "botnet":       int(y_win.sum()),
-                "botnet_ratio": float(y_win.mean()),
+            "full_77": {
+                "winflat": {
+                    "total":        int(len(y_win)),
+                    "botnet":       int(y_win.sum()),
+                    "botnet_ratio": float(y_win.mean()),
+                },
+                "seq": {
+                    "total":        int(len(y_seq)),
+                    "botnet":       int(y_seq.sum()),
+                    "botnet_ratio": float(y_seq.mean()),
+                },
             },
-            "seq": {
-                "total":        int(len(y_seq)),
-                "botnet":       int(y_seq.sum()),
-                "botnet_ratio": float(y_seq.mean()),
+            "common_8": {
+                "winflat": {
+                    "total":        int(len(y_win_c)),
+                    "botnet":       int(y_win_c.sum()),
+                    "botnet_ratio": float(y_win_c.mean()),
+                },
+                "seq": {
+                    "total":        int(len(y_seq_c)),
+                    "botnet":       int(y_seq_c.sum()),
+                    "botnet_ratio": float(y_seq_c.mean()),
+                },
             },
         }
 
     stats = {
-        "train": _stats(df_train, y_win_train, y_seq_train),
-        "val":   _stats(df_val,   y_win_val,   y_seq_val),
-        "test":  _stats(df_test,  y_win_test,  y_seq_test),
+        "train": _stats(df_train, y_win_train, y_seq_train, y_win_c_train, y_seq_c_train),
+        "val":   _stats(df_val,   y_win_val,   y_seq_val,   y_win_c_val,   y_seq_c_val),
+        "test":  _stats(df_test,  y_win_test,  y_seq_test,  y_win_c_test,  y_seq_c_test),
     }
 
     out_path = os.path.join(save_dir, "split_stats.json")
@@ -932,9 +917,9 @@ def save_split_stats(
     print(f"\n[STATS] 클래스 불균형 통계 저장 완료: {out_path}")
     for split_name, s in stats.items():
         print(
-            f"  {split_name}: flow Botnet {s['flow_level']['botnet_ratio']:.4f} | "
-            f"window Botnet {s['window_flat']['botnet_ratio']:.4f} | "
-            f"seq Botnet {s['seq']['botnet_ratio']:.4f}"
+            f"  {split_name}: flow {s['flow_level']['botnet_ratio']:.4f} | "
+            f"full winflat {s['full_77']['winflat']['botnet_ratio']:.4f} | "
+            f"common winflat {s['common_8']['winflat']['botnet_ratio']:.4f}"
         )
 
 
@@ -1049,8 +1034,10 @@ def main():
     #   ├── cicids2017_traffic.parquet
     #   ├── split_stats.json
     #   ├── flow_distribution.png
-    #   ├── winflat/   X_train/val/test.npy  y_train/val/test.npy
-    #   └── seq/       X_train/val/test.npy  y_train/val/test.npy  scaler_seq_w15.pkl
+    #   ├── winflat/         ← 77 features (CIC 단독 평가)
+    #   ├── seq/             ← 77 features (CIC 단독 평가) + scaler
+    #   ├── winflat_common/  ← 8 features  (CTU 교차검증)
+    #   └── seq_common/      ← 8 features  (CTU 교차검증) + scaler
 
     WINFLAT_DIR        = os.path.join(SAVE_DIR, "winflat")
     SEQ_DIR            = os.path.join(SAVE_DIR, "seq")
@@ -1107,9 +1094,11 @@ def main():
 
     # ── [COMMON_FEATURES 8개] winflat 저장 (교차검증용) ──────
     print(f"\n[STEP] RF/XGBoost window-flat ({len(COMMON_FEATURES)}개 features, 교차검증용)")
+    y_win_c_splits = {}
     for split_name, subset in [("train", df_train), ("val", df_val), ("test", df_test)]:
         X_win_c, y_win_c = create_window_flat_data(subset, COMMON_FEATURES, WINDOW_SIZE, STEP_SIZE)
         save_numpy(X_win_c, y_win_c, WINFLAT_COMMON_DIR, split_name)
+        y_win_c_splits[split_name] = y_win_c
 
     # ── [COMMON_FEATURES 8개] sequence + scaler 저장 (교차검증용)
     common_seq_tag = f"seq_common_w{WINDOW_SIZE}"
@@ -1127,11 +1116,15 @@ def main():
     save_numpy(X_va_c, y_va_c, SEQ_COMMON_DIR, "val")
     save_numpy(X_te_c, y_te_c, SEQ_COMMON_DIR, "test")
 
+    y_seq_c_splits = {"train": y_tr_c, "val": y_va_c, "test": y_te_c}
+
     # ── 클래스 불균형 통계 저장 ──────────────────────────────
     save_split_stats(
         df_train, df_val, df_test,
         y_win_splits["train"], y_win_splits["val"], y_win_splits["test"],
         y_seq_splits["train"], y_seq_splits["val"], y_seq_splits["test"],
+        y_win_c_splits["train"], y_win_c_splits["val"], y_win_c_splits["test"],
+        y_seq_c_splits["train"], y_seq_c_splits["val"], y_seq_c_splits["test"],
         SAVE_DIR,
     )
 

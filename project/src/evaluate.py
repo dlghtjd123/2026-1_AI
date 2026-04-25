@@ -1,19 +1,14 @@
 """
 evaluate.py
 
-1단계: CIC test 평가       — full 모델 (RF, XGBoost, CNN-LSTM) → cicids/winflat|seq test
-2단계: CTU 교차검증        — common 모델                        → ctu13/scenario1, scenario9
+1단계: CIC test 평가   — full 모델 (RF, XGBoost, CNN-LSTM) → cicids/winflat|seq test
+2단계: CTU 교차검증    — full 모델                          → ctu13/scenario9
 
 [CTU 교차검증 방식]
-① CTU 데이터를 CTU 자체 StandardScaler로 정규화
-   - CIC scaler로 CTU를 변환하면 분포 불일치로 성능 급락
-   - CTU 데이터 자체를 mean=0, std=1로 맞추면 모델이 학습한 스케일과 유사해짐
-   - 논문 서술: "CTU 데이터를 독립적으로 정규화한 뒤 평가"
-
-② CTU에서 threshold 재탐색
-   - CIC val에서 최적화된 threshold는 CTU 분포에서 맞지 않을 수 있음
-   - CTU 데이터 기준으로 threshold를 다시 찾아 최대 성능을 측정
-   - 논문 서술: "CTU 데이터 기준 최적 threshold 적용"
+- scenario9만 사용 (scenario1은 봇넷 그룹 1개로 split 불균형 문제)
+- preprocess_ctu13.py가 CICFlowMeter로 77개 feature 생성 + train/val/test 분리 + scaler 적용 완료
+- val set으로 threshold 탐색, test set으로 최종 평가
+- full 모델(77 features)을 그대로 사용
 """
 
 import json
@@ -32,7 +27,6 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.preprocessing import StandardScaler
 
 
 # =========================================================
@@ -46,13 +40,11 @@ MODEL_DIR  = _ROOT / "artifacts" / "models"
 RESULT_DIR = _ROOT / "artifacts" / "results"
 DATA_ROOT  = _PROJECT / "data" / "processed"
 
-CIC_WINFLAT        = DATA_ROOT / "cicids" / "winflat"
-CIC_SEQ            = DATA_ROOT / "cicids" / "seq"
-CIC_WINFLAT_COMMON = DATA_ROOT / "cicids" / "winflat_common"
-CIC_SEQ_COMMON     = DATA_ROOT / "cicids" / "seq_common"
+CIC_WINFLAT = DATA_ROOT / "cicids" / "winflat"
+CIC_SEQ     = DATA_ROOT / "cicids" / "seq"
+CTU_ROOT    = DATA_ROOT / "ctu13"
 
-CTU_ROOT     = DATA_ROOT / "ctu13"
-CTU_SCENARIOS = ["scenario1", "scenario9"]
+CTU_SCENARIOS = ["scenario9"]
 
 
 # =========================================================
@@ -109,18 +101,17 @@ def compute_metrics(y_true, y_pred, y_prob) -> dict:
 
 
 # =========================================================
-# threshold 재탐색
+# threshold 탐색
 # =========================================================
 def pick_best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, dict]:
-    """F1 → Recall → Precision 순으로 최적 threshold를 탐색한다."""
     best_score     = None
     best_threshold = 0.5
     best_metrics   = None
 
     for threshold in np.arange(0.05, 0.96, 0.01):
-        y_pred   = (y_prob >= threshold).astype(int)
-        metrics  = compute_metrics(y_true, y_pred, y_prob)
-        score    = (
+        y_pred  = (y_prob >= threshold).astype(int)
+        metrics = compute_metrics(y_true, y_pred, y_prob)
+        score   = (
             metrics["f1"],
             metrics["recall"],
             metrics["precision"],
@@ -136,81 +127,47 @@ def pick_best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, 
 
 
 # =========================================================
-# CTU 데이터 정규화 (CTU 자체 scaler)
-# ---------------------------------------------------------
-# CIC scaler를 CTU에 적용하면 분포 불일치로 성능 급락.
-# CTU 데이터를 자체적으로 StandardScaler로 정규화하면
-# 모델이 학습한 스케일(mean≈0, std≈1)과 유사해진다.
-# =========================================================
-def normalize_ctu(X: np.ndarray) -> np.ndarray:
-    """CTU 데이터를 자체 StandardScaler로 정규화한다."""
-    is_3d = X.ndim == 3
-    if is_3d:
-        n, w, f = X.shape
-        X_2d = X.reshape(-1, f)
-    else:
-        X_2d = X
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_2d)
-
-    return X_scaled.reshape(n, w, f).astype(np.float32) if is_3d else X_scaled.astype(np.float32)
-
-
-# =========================================================
 # RF / XGBoost 평가
 # =========================================================
-def evaluate_sklearn(
-    model,
-    threshold: float,
-    X: np.ndarray,
-    y: np.ndarray,
-    retune_threshold: bool = False,
-) -> dict:
-    y_prob = model.predict_proba(X)[:, 1]
-
-    if retune_threshold:
-        threshold, metrics = pick_best_threshold(y, y_prob)
-    else:
-        y_pred  = (y_prob >= threshold).astype(int)
-        metrics = compute_metrics(y, y_pred, y_prob)
-        metrics["selected_threshold"] = threshold
-
+def evaluate_sklearn(model, threshold: float, X: np.ndarray, y: np.ndarray) -> dict:
+    y_prob  = model.predict_proba(X)[:, 1]
+    y_pred  = (y_prob >= threshold).astype(int)
+    metrics = compute_metrics(y, y_pred, y_prob)
+    metrics["selected_threshold"] = threshold
     return metrics
 
 
 # =========================================================
 # CNN-LSTM 평가
+# ---------------------------------------------------------
+# X_eval=None이면 X_tune으로 평가 (CIC test용)
+# X_eval이 있으면 X_tune으로 threshold 탐색, X_eval로 평가 (CTU용)
 # =========================================================
 def evaluate_cnn_lstm(
     ckpt_path: Path,
     threshold: float,
-    X: np.ndarray,
-    y: np.ndarray,
+    X_tune: np.ndarray,
+    y_tune: np.ndarray,
+    X_eval: np.ndarray | None = None,
+    y_eval: np.ndarray | None = None,
     scaler_path: Path | None = None,
-    normalize_self: bool = False,
-    retune_threshold: bool = False,
     batch_size: int = 512,
 ) -> dict:
-    """
-    Parameters
-    ----------
-    scaler_path     : CIC scaler 경로. None이면 적용 안 함 (CIC test는 이미 스케일됨).
-    normalize_self  : True면 데이터 자체 StandardScaler 적용 (CTU 교차검증용).
-    retune_threshold: True면 해당 데이터 기준으로 threshold 재탐색.
-    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt   = torch.load(ckpt_path, map_location=device)
 
-    # CIC scaler 적용 (CIC test에는 사용 안 함 — 이미 스케일됨)
+    if X_eval is None:
+        X_eval, y_eval = X_tune, y_tune
+        retune = False
+    else:
+        retune = True
+
     if scaler_path is not None and scaler_path.exists():
         scaler = joblib.load(scaler_path)
-        n, w, f = X.shape
-        X = scaler.transform(X.reshape(-1, f)).reshape(n, w, f)
-
-    # CTU 자체 scaler 적용
-    if normalize_self:
-        X = normalize_ctu(X)
+        n, w, f = X_tune.shape
+        X_tune = scaler.transform(X_tune.reshape(-1, f)).reshape(n, w, f)
+        n, w, f = X_eval.shape
+        X_eval = scaler.transform(X_eval.reshape(-1, f)).reshape(n, w, f)
 
     model = CNNLSTMModel(
         n_features=ckpt["n_features"],
@@ -221,25 +178,24 @@ def evaluate_cnn_lstm(
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    # 배치 단위 추론 (OOM 방지)
-    y_prob_list = []
-    with torch.no_grad():
-        for start in range(0, len(X), batch_size):
-            X_batch = torch.tensor(
-                X[start : start + batch_size], dtype=torch.float32
-            ).to(device)
-            probs = torch.sigmoid(model(X_batch)).cpu().numpy()
-            y_prob_list.append(probs)
+    def _infer(X: np.ndarray) -> np.ndarray:
+        probs = []
+        with torch.no_grad():
+            for start in range(0, len(X), batch_size):
+                X_batch = torch.tensor(
+                    X[start : start + batch_size], dtype=torch.float32
+                ).to(device)
+                probs.append(torch.sigmoid(model(X_batch)).cpu().numpy())
+        return np.concatenate(probs)
 
-    y_prob = np.concatenate(y_prob_list)
+    if retune:
+        prob_tune    = _infer(X_tune)
+        threshold, _ = pick_best_threshold(y_tune, prob_tune)
 
-    if retune_threshold:
-        threshold, metrics = pick_best_threshold(y, y_prob)
-    else:
-        y_pred  = (y_prob >= threshold).astype(int)
-        metrics = compute_metrics(y, y_pred, y_prob)
-        metrics["selected_threshold"] = threshold
-
+    prob_eval = _infer(X_eval)
+    y_pred    = (prob_eval >= threshold).astype(int)
+    metrics   = compute_metrics(y_eval, y_pred, prob_eval)
+    metrics["selected_threshold"] = threshold
     return metrics
 
 
@@ -267,12 +223,12 @@ def print_table(title: str, rows: list[dict]) -> None:
 
 def row_from_metrics(model_name: str, m: dict) -> dict:
     return {
-        "model":     model_name,
-        "accuracy":  m["accuracy"],
-        "precision": m["precision"],
-        "recall":    m["recall"],
-        "f1":        m["f1"],
-        "roc_auc":   m["roc_auc"],
+        "model":    model_name,
+        "accuracy": m["accuracy"],
+        "precision":m["precision"],
+        "recall":   m["recall"],
+        "f1":       m["f1"],
+        "roc_auc":  m["roc_auc"],
     }
 
 
@@ -310,10 +266,9 @@ def stage1_cic_test() -> dict:
         "rf":  evaluate_sklearn(rf_model,  rf_thr,  X_flat, y_flat),
         "xgb": evaluate_sklearn(xgb_model, xgb_thr, X_flat, y_flat),
         "cnn_lstm": evaluate_cnn_lstm(
-            cnn_ckpt, cnn_thr, X_seq, y_seq,
-            scaler_path=None,      # X_test.npy는 전처리 시 이미 스케일됨
-            normalize_self=False,
-            retune_threshold=False,
+            cnn_ckpt, cnn_thr,
+            X_tune=X_seq, y_tune=y_seq,
+            scaler_path=None,  # 이미 스케일됨
         ),
     }
 
@@ -326,53 +281,109 @@ def stage1_cic_test() -> dict:
 
 
 # =========================================================
-# 2단계: CTU 교차검증 (common 모델)
+# 2단계: CTU 교차검증 — scenario9 (full 모델, 77 features)
 # ---------------------------------------------------------
-# normalize_self=True  : CTU 데이터 자체 scaler로 정규화
-# retune_threshold=True: CTU 데이터 기준 threshold 재탐색
+# [threshold 방식]
+# CTU val set으로 threshold sweep → test set으로 평가
+# RF/XGBoost가 0이 나오는 이유를 확인하기 위해
+# 확률 분포도 함께 저장한다.
 # =========================================================
 def stage2_ctu_cross() -> dict:
-    print("\n[2단계] CTU 교차검증 — common 모델 (8 features)")
-    print("  [적용] CTU 자체 정규화 + threshold 재탐색")
+    print("\n[2단계] CTU 교차검증 — scenario9, full 모델 (77 features)")
+    print("  [적용] CTU val set으로 threshold sweep, test set으로 평가")
 
-    rf_model,  rf_thr  = load_sklearn_model("rf_common")
-    xgb_model, xgb_thr = load_sklearn_model("xgb_common")
-    cnn_ckpt,  cnn_thr = load_cnn_lstm("cnn_lstm_common")
+    rf_model,  rf_thr  = load_sklearn_model("rf_full")
+    xgb_model, xgb_thr = load_sklearn_model("xgb_full")
+    cnn_ckpt,  cnn_thr = load_cnn_lstm("cnn_lstm_full")
 
     all_results = {}
 
     for scenario in CTU_SCENARIOS:
         print(f"\n  [{scenario}]")
 
-        X_flat = np.load(CTU_ROOT / scenario / "winflat" / "X.npy")
-        y_flat = np.load(CTU_ROOT / scenario / "winflat" / "y.npy").astype(int)
-        X_seq  = np.load(CTU_ROOT / scenario / "seq"     / "X.npy")
-        y_seq  = np.load(CTU_ROOT / scenario / "seq"     / "y.npy").astype(int)
+        X_flat_val  = np.load(CTU_ROOT / scenario / "winflat" / "X_val.npy")
+        y_flat_val  = np.load(CTU_ROOT / scenario / "winflat" / "y_val.npy").astype(int)
+        X_flat_test = np.load(CTU_ROOT / scenario / "winflat" / "X_test.npy")
+        y_flat_test = np.load(CTU_ROOT / scenario / "winflat" / "y_test.npy").astype(int)
 
-        # RF / XGBoost: 트리 모델은 scaler 불필요, threshold만 재탐색
-        X_flat_norm = normalize_ctu(X_flat)
+        X_seq_val  = np.load(CTU_ROOT / scenario / "seq" / "X_val.npy")
+        y_seq_val  = np.load(CTU_ROOT / scenario / "seq" / "y_val.npy").astype(int)
+        X_seq_test = np.load(CTU_ROOT / scenario / "seq" / "X_test.npy")
+        y_seq_test = np.load(CTU_ROOT / scenario / "seq" / "y_test.npy").astype(int)
+
+        # ── 확률값 계산 ──────────────────────────────────
+        rf_prob_val   = rf_model.predict_proba(X_flat_val)[:, 1]
+        rf_prob_test  = rf_model.predict_proba(X_flat_test)[:, 1]
+
+        xgb_prob_val  = xgb_model.predict_proba(X_flat_val)[:, 1]
+        xgb_prob_test = xgb_model.predict_proba(X_flat_test)[:, 1]
+
+        # ── 확률 분포 출력 (디버깅용) ────────────────────
+        print(f"\n  [확률 분포 — val 봇넷 샘플]")
+        rf_bot_probs  = rf_prob_val[y_flat_val == 1]
+        xgb_bot_probs = xgb_prob_val[y_flat_val == 1]
+        print(f"    RF  봇넷 확률: mean={rf_bot_probs.mean():.4f}  max={rf_bot_probs.max():.4f}  min={rf_bot_probs.min():.4f}")
+        print(f"    XGB 봇넷 확률: mean={xgb_bot_probs.mean():.4f}  max={xgb_bot_probs.max():.4f}  min={xgb_bot_probs.min():.4f}")
+
+        # ── CTU val 기준 threshold sweep ─────────────────
+        rf_thr_ctu,  _ = pick_best_threshold(y_flat_val, rf_prob_val)
+        xgb_thr_ctu, _ = pick_best_threshold(y_flat_val, xgb_prob_val)
+        print(f"\n  [CTU threshold sweep 결과]")
+        print(f"    RF  최적 threshold: {rf_thr_ctu:.2f}  (CIC: {rf_thr:.2f})")
+        print(f"    XGB 최적 threshold: {xgb_thr_ctu:.2f}  (CIC: {xgb_thr:.2f})")
+
+        # ── test 평가 ────────────────────────────────────
+        rf_pred_test  = (rf_prob_test  >= rf_thr_ctu).astype(int)
+        xgb_pred_test = (xgb_prob_test >= xgb_thr_ctu).astype(int)
+
+        rf_metrics  = compute_metrics(y_flat_test, rf_pred_test,  rf_prob_test)
+        xgb_metrics = compute_metrics(y_flat_test, xgb_pred_test, xgb_prob_test)
+        rf_metrics["selected_threshold"]  = rf_thr_ctu
+        xgb_metrics["selected_threshold"] = xgb_thr_ctu
+
+        # CNN-LSTM: CTU val로 threshold 탐색
+        cnn_metrics = evaluate_cnn_lstm(
+            cnn_ckpt, cnn_thr,
+            X_tune=X_seq_val,  y_tune=y_seq_val,
+            X_eval=X_seq_test, y_eval=y_seq_test,
+            scaler_path=None,
+        )
+
+        # ── 확률 분포 저장 (visualize.py에서 사용) ───────
+        prob_dist = {
+            "rf": {
+                "val_botnet":  rf_prob_val[y_flat_val == 1].tolist(),
+                "val_normal":  rf_prob_val[y_flat_val == 0].tolist(),
+                "test_botnet": rf_prob_test[y_flat_test == 1].tolist(),
+                "test_normal": rf_prob_test[y_flat_test == 0].tolist(),
+                "threshold_ctu": float(rf_thr_ctu),
+                "threshold_cic": float(rf_thr),
+            },
+            "xgb": {
+                "val_botnet":  xgb_prob_val[y_flat_val == 1].tolist(),
+                "val_normal":  xgb_prob_val[y_flat_val == 0].tolist(),
+                "test_botnet": xgb_prob_test[y_flat_test == 1].tolist(),
+                "test_normal": xgb_prob_test[y_flat_test == 0].tolist(),
+                "threshold_ctu": float(xgb_thr_ctu),
+                "threshold_cic": float(xgb_thr),
+            },
+        }
+
+        prob_path = RESULT_DIR / f"prob_dist_{scenario}.json"
+        with open(prob_path, "w") as f:
+            json.dump(prob_dist, f)
+        print(f"\n  [SAVED] 확률 분포: {prob_path}")
 
         results = {
-            "rf":  evaluate_sklearn(
-                rf_model,  rf_thr,  X_flat_norm, y_flat,
-                retune_threshold=True,
-            ),
-            "xgb": evaluate_sklearn(
-                xgb_model, xgb_thr, X_flat_norm, y_flat,
-                retune_threshold=True,
-            ),
-            "cnn_lstm": evaluate_cnn_lstm(
-                cnn_ckpt, cnn_thr, X_seq, y_seq,
-                scaler_path=None,
-                normalize_self=True,   # CTU 자체 scaler 적용
-                retune_threshold=True, # CTU 기준 threshold 재탐색
-            ),
+            "rf":       rf_metrics,
+            "xgb":      xgb_metrics,
+            "cnn_lstm": cnn_metrics,
         }
 
         print_table(f"2단계: CTU 교차검증 — {scenario}", [
-            row_from_metrics("RF (common)",       results["rf"]),
-            row_from_metrics("XGBoost (common)",  results["xgb"]),
-            row_from_metrics("CNN-LSTM (common)", results["cnn_lstm"]),
+            row_from_metrics("RF (full)",       results["rf"]),
+            row_from_metrics("XGBoost (full)",  results["xgb"]),
+            row_from_metrics("CNN-LSTM (full)", results["cnn_lstm"]),
         ])
 
         all_results[scenario] = results
