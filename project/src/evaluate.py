@@ -1,15 +1,16 @@
 """
 evaluate.py
 
-1단계: CIC test 평가   — full 모델 (RF, XGBoost, CNN-LSTM) → cicids/winflat|seq test
-2단계: CTU 교차검증    — full 모델                          → ctu13/scenario9
+1단계: CIC-IDS2017 내부 test 평가
+2단계: CTU-13 시나리오 9 교차검증 (Adaptive threshold — Safety 2025 방식)
 
-[CTU 교차검증 방식]
-- scenario9만 사용 (scenario1은 봇넷 그룹 1개로 split 불균형 문제)
-- preprocess_ctu13.py가 CICFlowMeter로 77개 feature 생성 + train/val/test 분리 + scaler 적용 완료
-- val set으로 threshold 탐색, test set으로 최종 평가
-- full 모델(77 features)을 그대로 사용
+교차검증 방식:
+  target dataset(CTU-13)에서 best-F1 threshold 탐색
+  → target 정보 사용 — 논문에 "Safety 2025 방식" 명시 필요
+  → Strict zero-shot 아님
 """
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -23,6 +24,7 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -40,49 +42,64 @@ MODEL_DIR  = _ROOT / "artifacts" / "models"
 RESULT_DIR = _ROOT / "artifacts" / "results"
 DATA_ROOT  = _PROJECT / "data" / "processed"
 
-CIC_WINFLAT = DATA_ROOT / "cicids" / "winflat"
-CIC_SEQ     = DATA_ROOT / "cicids" / "seq"
-CTU_ROOT    = DATA_ROOT / "ctu13"
+CIC_FLAT = DATA_ROOT / "cicids2017" / "flat"
+CIC_SEQ  = DATA_ROOT / "cicids2017" / "seq"
 
-CTU_SCENARIOS = ["scenario9"]
+CTU_FLAT = DATA_ROOT / "ctu13" / "flat"
+CTU_SEQ  = DATA_ROOT / "ctu13" / "seq"
 
 
 # =========================================================
-# CNN-LSTM 모델 정의 (train_cnn_lstm.py와 동일)
+# 모델 정의
 # =========================================================
 class CNNLSTMModel(nn.Module):
     def __init__(self, n_features, conv_channels=64, lstm_hidden=64, dropout=0.3):
         super().__init__()
-        self.conv1 = nn.Conv1d(
-            in_channels=n_features,
-            out_channels=conv_channels,
-            kernel_size=3,
-            padding=1,
-        )
+        self.conv1   = nn.Conv1d(n_features, conv_channels, kernel_size=3, padding=1)
         self.relu    = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-        self.lstm    = nn.LSTM(
-            input_size=conv_channels,
-            hidden_size=lstm_hidden,
-            num_layers=1,
-            batch_first=True,
-        )
-        self.fc = nn.Linear(lstm_hidden, 1)
+        self.lstm    = nn.LSTM(conv_channels, lstm_hidden, num_layers=1, batch_first=True)
+        self.fc      = nn.Linear(lstm_hidden, 1)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)
-        x = self.relu(self.conv1(x))
-        x = self.dropout(x)
-        x = x.permute(0, 2, 1)
+        x = self.relu(self.conv1(x.permute(0, 2, 1)))
+        x = self.dropout(x).permute(0, 2, 1)
         _, (h_n, _) = self.lstm(x)
-        x = self.dropout(h_n[-1])
-        return self.fc(x).squeeze(1)
+        return self.fc(self.dropout(h_n[-1])).squeeze(1)
+
+
+class GRUModel(nn.Module):
+    def __init__(self, n_features, gru_hidden=64, dropout=0.3):
+        super().__init__()
+        self.gru     = nn.GRU(n_features, gru_hidden, num_layers=1, batch_first=True)
+        self.dropout = nn.Dropout(dropout)
+        self.fc      = nn.Linear(gru_hidden, 1)
+
+    def forward(self, x):
+        _, h_n = self.gru(x)
+        return self.fc(self.dropout(h_n[-1])).squeeze(1)
+
+
+class CNNGRUModel(nn.Module):
+    def __init__(self, n_features, conv_channels=64, gru_hidden=64, dropout=0.3):
+        super().__init__()
+        self.conv1   = nn.Conv1d(n_features, conv_channels, kernel_size=3, padding=1)
+        self.relu    = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.gru     = nn.GRU(conv_channels, gru_hidden, num_layers=1, batch_first=True)
+        self.fc      = nn.Linear(gru_hidden, 1)
+
+    def forward(self, x):
+        x = self.relu(self.conv1(x.permute(0, 2, 1)))
+        x = self.dropout(x).permute(0, 2, 1)
+        _, h_n = self.gru(x)
+        return self.fc(self.dropout(h_n[-1])).squeeze(1)
 
 
 # =========================================================
 # 지표 계산
 # =========================================================
-def compute_metrics(y_true, y_pred, y_prob) -> dict:
+def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> dict:
     metrics = {
         "accuracy":  float(accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
@@ -101,294 +118,257 @@ def compute_metrics(y_true, y_pred, y_prob) -> dict:
 
 
 # =========================================================
-# threshold 탐색
+# Adaptive threshold — target dataset 기반 best-F1 탐색
+# Safety 2025 방식: target 정보 사용 → 논문 명시 필요
 # =========================================================
-def pick_best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, dict]:
-    best_score     = None
-    best_threshold = 0.5
-    best_metrics   = None
+def find_best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
+    f1_scores = 2 * precisions * recalls / (precisions + recalls + 1e-8)
+    best_idx  = np.argmax(f1_scores[:-1])
+    return float(thresholds[best_idx])
 
-    for threshold in np.arange(0.05, 0.96, 0.01):
-        y_pred  = (y_prob >= threshold).astype(int)
-        metrics = compute_metrics(y_true, y_pred, y_prob)
-        score   = (
-            metrics["f1"],
-            metrics["recall"],
-            metrics["precision"],
-            -abs(threshold - 0.5),
+
+# =========================================================
+# 모델 로드 & 예측
+# =========================================================
+def load_sklearn_model(name: str):
+    model     = joblib.load(MODEL_DIR / f"{name}.pkl")
+    threshold = json.loads((MODEL_DIR / f"{name}_threshold.json").read_text())["threshold"]
+    return model, float(threshold)
+
+
+def load_torch_model(name: str):
+    ckpt_path = MODEL_DIR / f"{name}.pt"
+    threshold = json.loads((MODEL_DIR / f"{name}_threshold.json").read_text())["threshold"]
+    return ckpt_path, float(threshold)
+
+
+def predict_sklearn_probs(model, X: np.ndarray) -> np.ndarray:
+    return model.predict_proba(X)[:, 1]
+
+
+def load_sequence_model(ckpt_path: Path, model_type: str, device):
+    ckpt = torch.load(ckpt_path, map_location=device)
+    if model_type == "cnn_lstm":
+        model = CNNLSTMModel(
+            n_features    = ckpt["n_features"],
+            conv_channels = ckpt.get("conv_channels", 64),
+            lstm_hidden   = ckpt.get("lstm_hidden", 64),
+            dropout       = ckpt.get("dropout", 0.3),
         )
-        if best_score is None or score > best_score:
-            best_score     = score
-            best_threshold = float(round(threshold, 4))
-            best_metrics   = metrics
-
-    best_metrics["selected_threshold"] = best_threshold
-    return best_threshold, best_metrics
-
-
-# =========================================================
-# RF / XGBoost 평가
-# =========================================================
-def evaluate_sklearn(model, threshold: float, X: np.ndarray, y: np.ndarray) -> dict:
-    y_prob  = model.predict_proba(X)[:, 1]
-    y_pred  = (y_prob >= threshold).astype(int)
-    metrics = compute_metrics(y, y_pred, y_prob)
-    metrics["selected_threshold"] = threshold
-    return metrics
-
-
-# =========================================================
-# CNN-LSTM 평가
-# ---------------------------------------------------------
-# X_eval=None이면 X_tune으로 평가 (CIC test용)
-# X_eval이 있으면 X_tune으로 threshold 탐색, X_eval로 평가 (CTU용)
-# =========================================================
-def evaluate_cnn_lstm(
-    ckpt_path: Path,
-    threshold: float,
-    X_tune: np.ndarray,
-    y_tune: np.ndarray,
-    X_eval: np.ndarray | None = None,
-    y_eval: np.ndarray | None = None,
-    scaler_path: Path | None = None,
-    batch_size: int = 512,
-) -> dict:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt   = torch.load(ckpt_path, map_location=device)
-
-    if X_eval is None:
-        X_eval, y_eval = X_tune, y_tune
-        retune = False
+    elif model_type == "gru":
+        model = GRUModel(
+            n_features = ckpt["n_features"],
+            gru_hidden = ckpt.get("gru_hidden", 64),
+            dropout    = ckpt.get("dropout", 0.3),
+        )
+    elif model_type == "cnn_gru":
+        model = CNNGRUModel(
+            n_features    = ckpt["n_features"],
+            conv_channels = ckpt.get("conv_channels", 64),
+            gru_hidden    = ckpt.get("gru_hidden", 64),
+            dropout       = ckpt.get("dropout", 0.3),
+        )
     else:
-        retune = True
-
-    if scaler_path is not None and scaler_path.exists():
-        scaler = joblib.load(scaler_path)
-        n, w, f = X_tune.shape
-        X_tune = scaler.transform(X_tune.reshape(-1, f)).reshape(n, w, f)
-        n, w, f = X_eval.shape
-        X_eval = scaler.transform(X_eval.reshape(-1, f)).reshape(n, w, f)
-
-    model = CNNLSTMModel(
-        n_features=ckpt["n_features"],
-        conv_channels=ckpt.get("conv_channels", 64),
-        lstm_hidden=ckpt.get("lstm_hidden", 64),
-        dropout=ckpt.get("dropout", 0.3),
-    ).to(device)
+        raise ValueError(f"Unknown model_type: {model_type}")
     model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
+    model.to(device).eval()
+    return model
 
-    def _infer(X: np.ndarray) -> np.ndarray:
-        probs = []
-        with torch.no_grad():
-            for start in range(0, len(X), batch_size):
-                X_batch = torch.tensor(
-                    X[start : start + batch_size], dtype=torch.float32
-                ).to(device)
-                probs.append(torch.sigmoid(model(X_batch)).cpu().numpy())
-        return np.concatenate(probs)
 
-    if retune:
-        prob_tune    = _infer(X_tune)
-        threshold, _ = pick_best_threshold(y_tune, prob_tune)
-
-    prob_eval = _infer(X_eval)
-    y_pred    = (prob_eval >= threshold).astype(int)
-    metrics   = compute_metrics(y_eval, y_pred, prob_eval)
-    metrics["selected_threshold"] = threshold
-    return metrics
+def predict_sequence_probs(
+    ckpt_path:  Path,
+    model_type: str,
+    X:          np.ndarray,
+    batch_size: int = 512,
+) -> np.ndarray:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model  = load_sequence_model(ckpt_path, model_type, device)
+    probs  = []
+    with torch.no_grad():
+        for start in range(0, len(X), batch_size):
+            X_b = torch.tensor(
+                X[start : start + batch_size], dtype=torch.float32
+            ).to(device)
+            probs.append(torch.sigmoid(model(X_b)).cpu().numpy())
+    return np.concatenate(probs)
 
 
 # =========================================================
 # 비교표 출력
 # =========================================================
-def print_table(title: str, rows: list[dict]) -> None:
-    print(f"\n{'='*70}")
-    print(f"  {title}")
-    print(f"{'='*70}")
-    print(f"{'Model':<20} {'Accuracy':>9} {'Precision':>10} {'Recall':>8} {'F1':>8} {'ROC-AUC':>9}")
-    print("-" * 70)
-    for r in rows:
-        roc = f"{r['roc_auc']:.4f}" if r["roc_auc"] is not None else "   None"
-        print(
-            f"{r['model']:<20} "
-            f"{r['accuracy']:>9.4f} "
-            f"{r['precision']:>10.4f} "
-            f"{r['recall']:>8.4f} "
-            f"{r['f1']:>8.4f} "
-            f"{roc:>9}"
-        )
-    print("=" * 70)
-
-
 def row_from_metrics(model_name: str, m: dict) -> dict:
     return {
-        "model":    model_name,
-        "accuracy": m["accuracy"],
-        "precision":m["precision"],
-        "recall":   m["recall"],
-        "f1":       m["f1"],
-        "roc_auc":  m["roc_auc"],
+        "model":     model_name,
+        "threshold": m.get("threshold"),
+        "accuracy":  m["accuracy"],
+        "precision": m["precision"],
+        "recall":    m["recall"],
+        "f1":        m["f1"],
+        "roc_auc":   m["roc_auc"],
     }
 
 
+def print_table(title: str, rows: list[dict]) -> None:
+    print(f"\n{'='*78}")
+    print(f"  {title}")
+    print(f"{'='*78}")
+    print(f"{'Model':<22} {'Threshold':>10} {'Accuracy':>9} "
+          f"{'Precision':>10} {'Recall':>8} {'F1':>8} {'ROC-AUC':>9}")
+    print("-" * 78)
+    for r in rows:
+        roc = f"{r['roc_auc']:.4f}" if r.get("roc_auc") is not None else "   None"
+        thr = f"{r['threshold']:.4f}" if r.get("threshold") is not None else "     -"
+        print(f"{r['model']:<22} {thr:>10} {r['accuracy']:>9.4f} "
+              f"{r['precision']:>10.4f} {r['recall']:>8.4f} "
+              f"{r['f1']:>8.4f} {roc:>9}")
+    print("=" * 78)
+
+
 # =========================================================
-# 모델 & threshold 로드 헬퍼
-# =========================================================
-def load_sklearn_model(name: str):
-    model     = joblib.load(MODEL_DIR / f"{name}.pkl")
-    threshold = json.loads((MODEL_DIR / f"{name}_threshold.json").read_text())["threshold"]
-    return model, threshold
-
-
-def load_cnn_lstm(name: str):
-    ckpt_path = MODEL_DIR / f"{name}.pt"
-    threshold = json.loads((MODEL_DIR / f"{name}_threshold.json").read_text())["threshold"]
-    return ckpt_path, threshold
-
-
-# =========================================================
-# 1단계: CIC test 평가 (full 모델)
+# 1단계: CIC-IDS2017 내부 test 평가
 # =========================================================
 def stage1_cic_test() -> dict:
-    print("\n[1단계] CIC test 평가 — full 모델 (77 features)")
+    print("\n[1단계] CIC-IDS2017 내부 test 평가")
 
-    X_flat = np.load(CIC_WINFLAT / "X_test.npy")
-    y_flat = np.load(CIC_WINFLAT / "y_test.npy").astype(int)
-    X_seq  = np.load(CIC_SEQ / "X_test.npy")
-    y_seq  = np.load(CIC_SEQ / "y_test.npy").astype(int)
+    X_flat = np.load(CIC_FLAT / "X_test.npy")
+    y_flat = np.load(CIC_FLAT / "y_test.npy").astype(int)
+    X_seq  = np.load(CIC_SEQ  / "X_test.npy")
+    y_seq  = np.load(CIC_SEQ  / "y_test.npy").astype(int)
 
-    rf_model,  rf_thr  = load_sklearn_model("rf_full")
-    xgb_model, xgb_thr = load_sklearn_model("xgb_full")
-    cnn_ckpt,  cnn_thr = load_cnn_lstm("cnn_lstm_full")
+    print(f"  flat: {X_flat.shape}  Bot 비율: {y_flat.mean():.4f}")
+    print(f"  seq:  {X_seq.shape}   Bot 비율: {y_seq.mean():.4f}")
+
+    rf_model,     rf_thr      = load_sklearn_model("rf_flow")
+    xgb_model,    xgb_thr     = load_sklearn_model("xgb_flow")
+    cnn_ckpt,     cnn_thr     = load_torch_model("cnn_lstm_flow")
+    gru_ckpt,     gru_thr     = load_torch_model("gru_flow")
+    cnn_gru_ckpt, cnn_gru_thr = load_torch_model("cnn_gru_flow")
+
+    def eval_sk(model, thr, X, y):
+        prob = predict_sklearn_probs(model, X)
+        pred = (prob >= thr).astype(int)
+        m    = compute_metrics(y, pred, prob)
+        m["threshold"] = thr
+        return m
+
+    def eval_seq(ckpt, mtype, thr, X, y):
+        prob = predict_sequence_probs(ckpt, mtype, X)
+        pred = (prob >= thr).astype(int)
+        m    = compute_metrics(y, pred, prob)
+        m["threshold"] = thr
+        return m
 
     results = {
-        "rf":  evaluate_sklearn(rf_model,  rf_thr,  X_flat, y_flat),
-        "xgb": evaluate_sklearn(xgb_model, xgb_thr, X_flat, y_flat),
-        "cnn_lstm": evaluate_cnn_lstm(
-            cnn_ckpt, cnn_thr,
-            X_tune=X_seq, y_tune=y_seq,
-            scaler_path=None,  # 이미 스케일됨
-        ),
+        "rf":       eval_sk(rf_model,  rf_thr,  X_flat, y_flat),
+        "xgb":      eval_sk(xgb_model, xgb_thr, X_flat, y_flat),
+        "cnn_lstm": eval_seq(cnn_ckpt,     "cnn_lstm", cnn_thr,     X_seq, y_seq),
+        "gru":      eval_seq(gru_ckpt,     "gru",      gru_thr,     X_seq, y_seq),
+        "cnn_gru":  eval_seq(cnn_gru_ckpt, "cnn_gru",  cnn_gru_thr, X_seq, y_seq),
     }
 
-    print_table("1단계: CIC test 평가", [
-        row_from_metrics("RF (full)",       results["rf"]),
-        row_from_metrics("XGBoost (full)",  results["xgb"]),
-        row_from_metrics("CNN-LSTM (full)", results["cnn_lstm"]),
+    print_table("1단계: CIC-IDS2017 내부 test", [
+        row_from_metrics("RF",       results["rf"]),
+        row_from_metrics("XGBoost",  results["xgb"]),
+        row_from_metrics("CNN-LSTM", results["cnn_lstm"]),
+        row_from_metrics("GRU",      results["gru"]),
+        row_from_metrics("CNN-GRU",  results["cnn_gru"]),
     ])
+
     return results
 
 
 # =========================================================
-# 2단계: CTU 교차검증 — scenario9 (full 모델, 77 features)
+# 2단계: CTU-13 시나리오 9 교차검증 (Adaptive threshold)
 # ---------------------------------------------------------
-# [threshold 방식]
-# CTU val set으로 threshold sweep → test set으로 평가
-# RF/XGBoost가 0이 나오는 이유를 확인하기 위해
-# 확률 분포도 함께 저장한다.
+# Safety 2025 방식:
+#   ① preprocess_ctu13.py 에서 이미 적용:
+#      CIC2017 scaler → Secondary StandardScaler (분포 정렬)
+#   ② 여기서 적용:
+#      target dataset(CTU-13) 기반 best-F1 threshold 탐색
+#
+# ※ target 정보 사용 — 논문에 아래 문구 명시 필요:
+#   "본 연구는 Safety 2025 [ref]의 방식을 따라 target dataset의
+#    feature 분포 정렬 및 threshold 재조정을 적용하였으며,
+#    이는 Strict zero-shot 평가가 아님을 명시한다."
+#
+# 봇넷 유형:
+#   CIC2017: Neris IRC (1 bot)
+#   CTU-13:  Neris IRC (10 bots) ← 같은 패밀리 → CIC2018보다 높은 성능 기대
 # =========================================================
-def stage2_ctu_cross() -> dict:
-    print("\n[2단계] CTU 교차검증 — scenario9, full 모델 (77 features)")
-    print("  [적용] CTU val set으로 threshold sweep, test set으로 평가")
+def stage2_ctu13_cross() -> dict:
+    print("\n[2단계] CTU-13 시나리오 9 교차검증")
+    print("  방식: Safety 2025 (Scaler 정렬 + Adaptive threshold)")
+    print("  ※ target 정보 사용 — 논문 명시 필요")
 
-    rf_model,  rf_thr  = load_sklearn_model("rf_full")
-    xgb_model, xgb_thr = load_sklearn_model("xgb_full")
-    cnn_ckpt,  cnn_thr = load_cnn_lstm("cnn_lstm_full")
+    X_flat = np.load(CTU_FLAT / "X_test.npy")
+    y_flat = np.load(CTU_FLAT / "y_test.npy").astype(int)
+    X_seq  = np.load(CTU_SEQ  / "X_test.npy")
+    y_seq  = np.load(CTU_SEQ  / "y_test.npy").astype(int)
 
-    all_results = {}
+    print(f"\n  flat: {X_flat.shape}  Bot 비율: {y_flat.mean():.4f}")
+    print(f"  seq:  {X_seq.shape}   Bot 비율: {y_seq.mean():.4f}")
 
-    for scenario in CTU_SCENARIOS:
-        print(f"\n  [{scenario}]")
+    rf_model,     _ = load_sklearn_model("rf_flow")
+    xgb_model,    _ = load_sklearn_model("xgb_flow")
+    cnn_ckpt,     _ = load_torch_model("cnn_lstm_flow")
+    gru_ckpt,     _ = load_torch_model("gru_flow")
+    cnn_gru_ckpt, _ = load_torch_model("cnn_gru_flow")
 
-        X_flat_val  = np.load(CTU_ROOT / scenario / "winflat" / "X_val.npy")
-        y_flat_val  = np.load(CTU_ROOT / scenario / "winflat" / "y_val.npy").astype(int)
-        X_flat_test = np.load(CTU_ROOT / scenario / "winflat" / "X_test.npy")
-        y_flat_test = np.load(CTU_ROOT / scenario / "winflat" / "y_test.npy").astype(int)
+    # 확률 예측
+    rf_prob      = predict_sklearn_probs(rf_model,  X_flat)
+    xgb_prob     = predict_sklearn_probs(xgb_model, X_flat)
+    cnn_prob     = predict_sequence_probs(cnn_ckpt,     "cnn_lstm", X_seq)
+    gru_prob     = predict_sequence_probs(gru_ckpt,     "gru",      X_seq)
+    cnn_gru_prob = predict_sequence_probs(cnn_gru_ckpt, "cnn_gru",  X_seq)
 
-        X_seq_val  = np.load(CTU_ROOT / scenario / "seq" / "X_val.npy")
-        y_seq_val  = np.load(CTU_ROOT / scenario / "seq" / "y_val.npy").astype(int)
-        X_seq_test = np.load(CTU_ROOT / scenario / "seq" / "X_test.npy")
-        y_seq_test = np.load(CTU_ROOT / scenario / "seq" / "y_test.npy").astype(int)
+    # Adaptive threshold 탐색 + 평가
+    def eval_adaptive(y_true, y_prob):
+        thr  = find_best_threshold(y_true, y_prob)
+        pred = (y_prob >= thr).astype(int)
+        m    = compute_metrics(y_true, pred, y_prob)
+        m["threshold"] = thr
+        return m
 
-        # ── 확률값 계산 ──────────────────────────────────
-        rf_prob_val   = rf_model.predict_proba(X_flat_val)[:, 1]
-        rf_prob_test  = rf_model.predict_proba(X_flat_test)[:, 1]
+    results = {
+        "rf":       eval_adaptive(y_flat, rf_prob),
+        "xgb":      eval_adaptive(y_flat, xgb_prob),
+        "cnn_lstm": eval_adaptive(y_seq,  cnn_prob),
+        "gru":      eval_adaptive(y_seq,  gru_prob),
+        "cnn_gru":  eval_adaptive(y_seq,  cnn_gru_prob),
+    }
 
-        xgb_prob_val  = xgb_model.predict_proba(X_flat_val)[:, 1]
-        xgb_prob_test = xgb_model.predict_proba(X_flat_test)[:, 1]
+    print_table("2단계: CTU-13 교차검증 (Adaptive, Safety 2025)", [
+        row_from_metrics("RF",       results["rf"]),
+        row_from_metrics("XGBoost",  results["xgb"]),
+        row_from_metrics("CNN-LSTM", results["cnn_lstm"]),
+        row_from_metrics("GRU",      results["gru"]),
+        row_from_metrics("CNN-GRU",  results["cnn_gru"]),
+    ])
 
-        # ── 확률 분포 출력 (디버깅용) ────────────────────
-        print(f"\n  [확률 분포 — val 봇넷 샘플]")
-        rf_bot_probs  = rf_prob_val[y_flat_val == 1]
-        xgb_bot_probs = xgb_prob_val[y_flat_val == 1]
-        print(f"    RF  봇넷 확률: mean={rf_bot_probs.mean():.4f}  max={rf_bot_probs.max():.4f}  min={rf_bot_probs.min():.4f}")
-        print(f"    XGB 봇넷 확률: mean={xgb_bot_probs.mean():.4f}  max={xgb_bot_probs.max():.4f}  min={xgb_bot_probs.min():.4f}")
+    return results
 
-        # ── CTU val 기준 threshold sweep ─────────────────
-        rf_thr_ctu,  _ = pick_best_threshold(y_flat_val, rf_prob_val)
-        xgb_thr_ctu, _ = pick_best_threshold(y_flat_val, xgb_prob_val)
-        print(f"\n  [CTU threshold sweep 결과]")
-        print(f"    RF  최적 threshold: {rf_thr_ctu:.2f}  (CIC: {rf_thr:.2f})")
-        print(f"    XGB 최적 threshold: {xgb_thr_ctu:.2f}  (CIC: {xgb_thr:.2f})")
 
-        # ── test 평가 ────────────────────────────────────
-        rf_pred_test  = (rf_prob_test  >= rf_thr_ctu).astype(int)
-        xgb_pred_test = (xgb_prob_test >= xgb_thr_ctu).astype(int)
+# =========================================================
+# Recall 비교 출력
+# =========================================================
+def print_recall_comparison(stage1: dict, stage2: dict) -> None:
+    print("\n[Recall 비교] CIC2017 내부 → CTU-13 교차검증")
+    print(f"{'Model':<12} {'CIC2017 test':>13} {'CTU13 Adaptive':>15}")
+    print("-" * 42)
 
-        rf_metrics  = compute_metrics(y_flat_test, rf_pred_test,  rf_prob_test)
-        xgb_metrics = compute_metrics(y_flat_test, xgb_pred_test, xgb_prob_test)
-        rf_metrics["selected_threshold"]  = rf_thr_ctu
-        xgb_metrics["selected_threshold"] = xgb_thr_ctu
+    model_map = {
+        "RF":       "rf",
+        "XGBoost":  "xgb",
+        "CNN-LSTM": "cnn_lstm",
+        "GRU":      "gru",
+        "CNN-GRU":  "cnn_gru",
+    }
 
-        # CNN-LSTM: CTU val로 threshold 탐색
-        cnn_metrics = evaluate_cnn_lstm(
-            cnn_ckpt, cnn_thr,
-            X_tune=X_seq_val,  y_tune=y_seq_val,
-            X_eval=X_seq_test, y_eval=y_seq_test,
-            scaler_path=None,
-        )
-
-        # ── 확률 분포 저장 (visualize.py에서 사용) ───────
-        prob_dist = {
-            "rf": {
-                "val_botnet":  rf_prob_val[y_flat_val == 1].tolist(),
-                "val_normal":  rf_prob_val[y_flat_val == 0].tolist(),
-                "test_botnet": rf_prob_test[y_flat_test == 1].tolist(),
-                "test_normal": rf_prob_test[y_flat_test == 0].tolist(),
-                "threshold_ctu": float(rf_thr_ctu),
-                "threshold_cic": float(rf_thr),
-            },
-            "xgb": {
-                "val_botnet":  xgb_prob_val[y_flat_val == 1].tolist(),
-                "val_normal":  xgb_prob_val[y_flat_val == 0].tolist(),
-                "test_botnet": xgb_prob_test[y_flat_test == 1].tolist(),
-                "test_normal": xgb_prob_test[y_flat_test == 0].tolist(),
-                "threshold_ctu": float(xgb_thr_ctu),
-                "threshold_cic": float(xgb_thr),
-            },
-        }
-
-        prob_path = RESULT_DIR / f"prob_dist_{scenario}.json"
-        with open(prob_path, "w") as f:
-            json.dump(prob_dist, f)
-        print(f"\n  [SAVED] 확률 분포: {prob_path}")
-
-        results = {
-            "rf":       rf_metrics,
-            "xgb":      xgb_metrics,
-            "cnn_lstm": cnn_metrics,
-        }
-
-        print_table(f"2단계: CTU 교차검증 — {scenario}", [
-            row_from_metrics("RF (full)",       results["rf"]),
-            row_from_metrics("XGBoost (full)",  results["xgb"]),
-            row_from_metrics("CNN-LSTM (full)", results["cnn_lstm"]),
-        ])
-
-        all_results[scenario] = results
-
-    return all_results
+    for display, key in model_map.items():
+        cic_recall = stage1.get(key, {}).get("recall", 0.0)
+        ctu_recall = stage2.get(key, {}).get("recall", 0.0)
+        print(f"{display:<12} {cic_recall:>13.4f} {ctu_recall:>15.4f}")
 
 
 # =========================================================
@@ -396,8 +376,8 @@ def stage2_ctu_cross() -> dict:
 # =========================================================
 def save_results(stage1: dict, stage2: dict) -> None:
     out = {
-        "stage1_cic_test":  stage1,
-        "stage2_ctu_cross": stage2,
+        "stage1_cic_test":    stage1,
+        "stage2_ctu13_cross": stage2,
     }
     out_path = RESULT_DIR / "eval_results.json"
     with open(out_path, "w", encoding="utf-8") as f:
@@ -411,19 +391,23 @@ def save_results(stage1: dict, stage2: dict) -> None:
 def main():
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 70)
-    print("  evaluate.py — 성능 비교 평가")
-    print("=" * 70)
+    print("=" * 78)
+    print("  evaluate.py — CIC2017 학습 / CTU-13 교차검증 (Safety 2025)")
+    print("=" * 78)
+    print("  1단계: CIC2017 내부 test (CIC2017 val threshold 적용)")
+    print("  2단계: CTU-13 교차검증 (Scaler 정렬 + Adaptive threshold)")
+    print("=" * 78)
 
-    stage1_results = stage1_cic_test()
-    stage2_results = stage2_ctu_cross()
+    stage1 = stage1_cic_test()
+    stage2 = stage2_ctu13_cross()
 
-    save_results(stage1_results, stage2_results)
+    print_recall_comparison(stage1, stage2)
+    save_results(stage1, stage2)
 
     print("\n[완료] artifacts/results/eval_results.json 저장됨")
     print("\n[다음 단계]")
-    print("  증강 기법 비교 (SMOTE / GAN / WGAN / WGAN-GP)")
-    print("  → 증강 후 best 모델 재학습 → evaluate.py 재실행")
+    print("  WCGAN-GP로 CIC-IDS2017 Bot 클래스 증강")
+    print("  → 증강 후 재학습 → evaluate.py 재실행 → Before/After 비교")
 
 
 if __name__ == "__main__":

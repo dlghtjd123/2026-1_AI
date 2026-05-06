@@ -28,7 +28,7 @@ _ROOT      = _PROJECT.parent
 MODEL_DIR  = _ROOT / "artifacts" / "models"
 RESULT_DIR = _ROOT / "artifacts" / "results"
 
-DATA_DIR   = _PROJECT / "data" / "processed" / "cicids2017" / "seq"
+DATA_DIR = _PROJECT / "data" / "processed" / "cicids2017" / "seq"
 
 
 def set_seed(seed: int = 42):
@@ -50,31 +50,20 @@ class SequenceDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-class CNNLSTMModel(nn.Module):
-    def __init__(self, n_features, conv_channels=64, lstm_hidden=64, dropout=0.3):
+class GRUModel(nn.Module):
+    def __init__(self, n_features, gru_hidden=64, dropout=0.3):
         super().__init__()
-        self.conv1 = nn.Conv1d(
-            in_channels=n_features,
-            out_channels=conv_channels,
-            kernel_size=3,
-            padding=1,
-        )
-        self.relu    = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-        self.lstm    = nn.LSTM(
-            input_size=conv_channels,
-            hidden_size=lstm_hidden,
+        self.gru = nn.GRU(
+            input_size=n_features,
+            hidden_size=gru_hidden,
             num_layers=1,
             batch_first=True,
         )
-        self.fc = nn.Linear(lstm_hidden, 1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(gru_hidden, 1)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)
-        x = self.relu(self.conv1(x))
-        x = self.dropout(x)
-        x = x.permute(0, 2, 1)
-        _, (h_n, _) = self.lstm(x)
+        _, h_n = self.gru(x)
         x = self.dropout(h_n[-1])
         return self.fc(x).squeeze(1)
 
@@ -215,8 +204,10 @@ def main():
         SequenceDataset(X_val, y_val),     batch_size=256, shuffle=False, num_workers=0
     )
 
-    model = CNNLSTMModel(
-        n_features=n_features, conv_channels=64, lstm_hidden=64, dropout=0.3
+    model = GRUModel(
+        n_features=n_features,
+        gru_hidden=64,
+        dropout=0.3,
     ).to(device)
 
     pos_count        = np.sum(y_train == 1)
@@ -292,29 +283,28 @@ def main():
 
     best_val_metrics["selected_threshold"] = best_threshold
     print(f"\n[INFO] Best epoch: {best_epoch}")
-    print_metrics("CNN-LSTM Validation", best_val_metrics, loss=best_val_loss)
+    print_metrics("GRU Validation", best_val_metrics, loss=best_val_loss)
 
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            "n_features":    n_features,
-            "window_size":   X_train.shape[1],
-            "conv_channels": 64,
-            "lstm_hidden":   64,
-            "dropout":       0.3,
+            "n_features":  n_features,
+            "window_size": X_train.shape[1],
+            "gru_hidden":  64,
+            "dropout":     0.3,
         },
-        MODEL_DIR / "cnn_lstm_flow.pt",
+        MODEL_DIR / "gru_flow.pt",
     )
 
-    with open(MODEL_DIR / "cnn_lstm_flow_threshold.json", "w", encoding="utf-8") as f:
+    with open(MODEL_DIR / "gru_flow_threshold.json", "w", encoding="utf-8") as f:
         json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
 
-    with open(RESULT_DIR / "cnn_lstm_flow_val_metrics.json", "w", encoding="utf-8") as f:
+    with open(RESULT_DIR / "gru_flow_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(best_val_metrics, f, indent=4, ensure_ascii=False)
 
-    print(f"\n[SAVED] artifacts/models/cnn_lstm_flow.pt")
-    print(f"[SAVED] artifacts/models/cnn_lstm_flow_threshold.json")
-    print(f"[SAVED] artifacts/results/cnn_lstm_flow_val_metrics.json")
+    print(f"\n[SAVED] artifacts/models/gru_flow.pt")
+    print(f"[SAVED] artifacts/models/gru_flow_threshold.json")
+    print(f"[SAVED] artifacts/results/gru_flow_val_metrics.json")
 
 
 if __name__ == "__main__":

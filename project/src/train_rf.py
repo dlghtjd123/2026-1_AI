@@ -1,4 +1,3 @@
-import argparse
 import json
 from pathlib import Path
 
@@ -26,22 +25,7 @@ _ROOT      = _PROJECT.parent
 MODEL_DIR  = _ROOT / "artifacts" / "models"
 RESULT_DIR = _ROOT / "artifacts" / "results"
 
-_WINFLAT = {
-    "full":   _PROJECT / "data" / "processed" / "cicids" / "winflat",
-    "common": _PROJECT / "data" / "processed" / "cicids" / "winflat_common",
-}
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train Random Forest")
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["full", "common"],
-        default="full",
-        help="full: CIC 77 features (단독 평가용) | common: CIC 8 features (CTU 교차검증용)",
-    )
-    return parser.parse_args()
+DATA_DIR = _PROJECT / "data" / "processed" / "cicids2017" / "flat"
 
 
 def load_data(data_dir: Path):
@@ -50,6 +34,11 @@ def load_data(data_dir: Path):
     X_val   = np.load(data_dir / "X_val.npy")
     y_val   = np.load(data_dir / "y_val.npy").astype(int)
     return X_train, y_train, X_val, y_val
+
+def load_cross_data(data_dir: Path):
+    X_test = np.load(data_dir / "X_test.npy")
+    y_test = np.load(data_dir / "y_test.npy").astype(int)
+    return X_test, y_test
 
 
 def compute_metrics(y_true, y_pred, y_prob):
@@ -75,19 +64,44 @@ def pick_best_threshold(y_true, y_prob):
     best_threshold = 0.5
     best_metrics = None
 
-    for threshold in np.arange(0.05, 0.96, 0.01):
+    thresholds = np.arange(0.05, 0.96, 0.01)
+
+    for threshold in thresholds:
         y_pred = (y_prob >= threshold).astype(int)
         metrics = compute_metrics(y_true, y_pred, y_prob)
+
+        # Recall을 너무 낮게 만드는 threshold는 제외
+        if metrics["recall"] < 0.8:
+            continue
+
         candidate = (
             metrics["f1"],
-            metrics["recall"],
             metrics["precision"],
-            -abs(threshold - 0.5),
+            -threshold,
         )
+
         if best is None or candidate > best:
             best = candidate
             best_threshold = float(round(threshold, 4))
             best_metrics = metrics
+
+    # recall >= 0.8을 만족하는 threshold가 없을 경우 fallback
+    if best_metrics is None:
+        for threshold in thresholds:
+            y_pred = (y_prob >= threshold).astype(int)
+            metrics = compute_metrics(y_true, y_pred, y_prob)
+
+            candidate = (
+                metrics["recall"],
+                metrics["f1"],
+                metrics["precision"],
+                -threshold,
+            )
+
+            if best is None or candidate > best:
+                best = candidate
+                best_threshold = float(round(threshold, 4))
+                best_metrics = metrics
 
     best_metrics["selected_threshold"] = best_threshold
     return best_threshold, best_metrics
@@ -110,19 +124,15 @@ def print_metrics(name, metrics):
 
 
 def main():
-    args = parse_args()
-    mode = args.mode
-    data_dir = _WINFLAT[mode]
-
-    print(f"[CONFIG] mode : {mode}")
-    print(f"[CONFIG] data : {data_dir}")
+    print(f"[CONFIG] data : {DATA_DIR}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-    X_train, y_train, X_val, y_val = load_data(data_dir)
+    X_train, y_train, X_val, y_val = load_data(DATA_DIR)
     print("[INFO] X_train shape:", X_train.shape)
     print("[INFO] X_val shape  :", X_val.shape)
+    print(f"[INFO] Botnet ratio (train): {y_train.mean():.4f}")
 
     model = RandomForestClassifier(
         n_estimators=500,
@@ -139,19 +149,19 @@ def main():
     val_prob = model.predict_proba(X_val)[:, 1]
     best_threshold, val_metrics = pick_best_threshold(y_val, val_prob)
 
-    print_metrics(f"RF [{mode}] Validation", val_metrics)
+    print_metrics("RF Validation", val_metrics)
 
-    joblib.dump(model, MODEL_DIR / f"rf_{mode}.pkl")
+    joblib.dump(model, MODEL_DIR / "rf_flow.pkl")
 
-    with open(MODEL_DIR / f"rf_{mode}_threshold.json", "w", encoding="utf-8") as f:
-        json.dump({"threshold": best_threshold, "mode": mode}, f, indent=4, ensure_ascii=False)
+    with open(MODEL_DIR / "rf_flow_threshold.json", "w", encoding="utf-8") as f:
+        json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
 
-    with open(RESULT_DIR / f"rf_{mode}_val_metrics.json", "w", encoding="utf-8") as f:
+    with open(RESULT_DIR / "rf_flow_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(val_metrics, f, indent=4, ensure_ascii=False)
 
-    print(f"\n[SAVED] artifacts/models/rf_{mode}.pkl")
-    print(f"[SAVED] artifacts/models/rf_{mode}_threshold.json")
-    print(f"[SAVED] artifacts/results/rf_{mode}_val_metrics.json")
+    print(f"\n[SAVED] artifacts/models/rf_flow.pkl")
+    print(f"[SAVED] artifacts/models/rf_full_threshold.json")
+    print(f"[SAVED] artifacts/results/rf_flow_val_metrics.json")
 
 
 if __name__ == "__main__":

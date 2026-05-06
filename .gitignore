@@ -22,8 +22,7 @@ Thumbs.db
 *.log
 
 # Data
-data/raw/
-data/interim/
+project/data/raw/
 data/processed/
 
 # Model / artifacts
@@ -37,3 +36,6 @@ data/processed/
 # Temporary
 tmp/
 temp/
+
+# Artifacts / Result
+artifacts/

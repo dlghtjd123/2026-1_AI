@@ -9,18 +9,15 @@
 
 # 실행 순서
 # 1. 전처리
-python preprocess_cicids.py
-python preprocess_ctu13.py
-# 2. CIC 단독 평가용 학습 (77 features)
-python train_rf.py --mode full
-python train_xgb.py --mode full
-python train_cnn_lstm.py --mode full
-# 3. 평가 (1단계 CIC + 2단계 CTU 비교표 출력)
+python preprocess_cicids2017.py
+python preprocess_cicids2018.py 
+# 2. CIC 단독 평가용 학습
+python train_rf.py
+python train_xgb.py
+python train_cnn_lstm.py
+python train_gru.py
+python train_cnn_gru.py
+# 3. Baseline cross-dataset 성능 측정
 python evaluate.py
-
-# (생략) CTU 데이터셋 통일 (CICFlowMeter, src 폴더 기준)
-python pcap_to_csv.py
-# (생략) CTU 교차검증용 학습 (8 features)
-python train_rf.py --mode common
-python train_xgb.py --mode common
-python train_cnn_lstm.py --mode common
+# 4. 결과 시각화
+python visualize.py               # 결과 시각화
