@@ -1,4 +1,5 @@
 import json
+import argparse
 from pathlib import Path
 
 import joblib
@@ -26,6 +27,15 @@ MODEL_DIR  = _ROOT / "artifacts" / "models"
 RESULT_DIR = _ROOT / "artifacts" / "results"
 
 DATA_DIR = _PROJECT / "data" / "processed" / "cicids2017" / "flat"
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--augment",
+    type=str,
+    default="none",
+    choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
+)
+AUGMENT = parser.parse_args().augment
 
 
 def load_data(data_dir: Path):

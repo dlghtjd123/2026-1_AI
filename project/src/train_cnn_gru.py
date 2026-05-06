@@ -1,6 +1,7 @@
 import copy
 import json
 import random
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,15 @@ MODEL_DIR  = _ROOT / "artifacts" / "models"
 RESULT_DIR = _ROOT / "artifacts" / "results"
 
 DATA_DIR = _PROJECT / "data" / "processed" / "cicids2017" / "seq"
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--augment",
+    type=str,
+    default="none",
+    choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
+)
+AUGMENT = parser.parse_args().augment
 
 
 def set_seed(seed: int = 42):

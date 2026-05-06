@@ -4,14 +4,17 @@ evaluate.py
 1단계: CIC-IDS2017 내부 test 평가
 2단계: CTU-13 시나리오 9 교차검증 (Adaptive threshold — Safety 2025 방식)
 
-교차검증 방식:
-  target dataset(CTU-13)에서 best-F1 threshold 탐색
-  → target 정보 사용 — 논문에 "Safety 2025 방식" 명시 필요
-  → Strict zero-shot 아님
+사용법:
+  python evaluate.py                    # Baseline
+  python evaluate.py --augment smote
+  python evaluate.py --augment gan
+  python evaluate.py --augment wgan_gp
+  python evaluate.py --augment wcgan_gp
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -32,19 +35,37 @@ from sklearn.metrics import (
 
 
 # =========================================================
-# 경로 설정
+# --augment 인자 파싱
 # =========================================================
-_SRC_DIR   = Path(__file__).resolve().parent
-_PROJECT   = _SRC_DIR.parent
-_ROOT      = _PROJECT.parent
+_parser = argparse.ArgumentParser()
+_parser.add_argument(
+    "--augment",
+    type=str,
+    default="none",
+    choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
+    help="사용할 증강 방식 (default: none)",
+)
+AUGMENT = _parser.parse_args().augment
 
-MODEL_DIR  = _ROOT / "artifacts" / "models"
-RESULT_DIR = _ROOT / "artifacts" / "results"
+
+# =========================================================
+# 경로 설정 — AUGMENT 값에 따라 자동 변경
+# =========================================================
+_SRC_DIR  = Path(__file__).resolve().parent
+_PROJECT  = _SRC_DIR.parent
+_ROOT     = _PROJECT.parent
+
+_SUFFIX   = f"_{AUGMENT}" if AUGMENT != "none" else ""
+
+MODEL_DIR  = _ROOT / "artifacts" / f"models{_SUFFIX}"
+RESULT_DIR = _ROOT / "artifacts" / f"results{_SUFFIX}"
 DATA_ROOT  = _PROJECT / "data" / "processed"
 
+# CIC-IDS2017 test 데이터는 증강과 무관하게 원본 사용
 CIC_FLAT = DATA_ROOT / "cicids2017" / "flat"
 CIC_SEQ  = DATA_ROOT / "cicids2017" / "seq"
 
+# CTU-13은 항상 동일
 CTU_FLAT = DATA_ROOT / "ctu13" / "flat"
 CTU_SEQ  = DATA_ROOT / "ctu13" / "seq"
 
@@ -117,10 +138,6 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) 
     return metrics
 
 
-# =========================================================
-# Adaptive threshold — target dataset 기반 best-F1 탐색
-# Safety 2025 방식: target 정보 사용 → 논문 명시 필요
-# =========================================================
 def find_best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
     f1_scores = 2 * precisions * recalls / (precisions + recalls + 1e-8)
@@ -267,7 +284,7 @@ def stage1_cic_test() -> dict:
         "cnn_gru":  eval_seq(cnn_gru_ckpt, "cnn_gru",  cnn_gru_thr, X_seq, y_seq),
     }
 
-    print_table("1단계: CIC-IDS2017 내부 test", [
+    print_table(f"1단계: CIC-IDS2017 내부 test [{AUGMENT}]", [
         row_from_metrics("RF",       results["rf"]),
         row_from_metrics("XGBoost",  results["xgb"]),
         row_from_metrics("CNN-LSTM", results["cnn_lstm"]),
@@ -280,21 +297,6 @@ def stage1_cic_test() -> dict:
 
 # =========================================================
 # 2단계: CTU-13 시나리오 9 교차검증 (Adaptive threshold)
-# ---------------------------------------------------------
-# Safety 2025 방식:
-#   ① preprocess_ctu13.py 에서 이미 적용:
-#      CIC2017 scaler → Secondary StandardScaler (분포 정렬)
-#   ② 여기서 적용:
-#      target dataset(CTU-13) 기반 best-F1 threshold 탐색
-#
-# ※ target 정보 사용 — 논문에 아래 문구 명시 필요:
-#   "본 연구는 Safety 2025 [ref]의 방식을 따라 target dataset의
-#    feature 분포 정렬 및 threshold 재조정을 적용하였으며,
-#    이는 Strict zero-shot 평가가 아님을 명시한다."
-#
-# 봇넷 유형:
-#   CIC2017: Neris IRC (1 bot)
-#   CTU-13:  Neris IRC (10 bots) ← 같은 패밀리 → CIC2018보다 높은 성능 기대
 # =========================================================
 def stage2_ctu13_cross() -> dict:
     print("\n[2단계] CTU-13 시나리오 9 교차검증")
@@ -315,14 +317,12 @@ def stage2_ctu13_cross() -> dict:
     gru_ckpt,     _ = load_torch_model("gru_flow")
     cnn_gru_ckpt, _ = load_torch_model("cnn_gru_flow")
 
-    # 확률 예측
     rf_prob      = predict_sklearn_probs(rf_model,  X_flat)
     xgb_prob     = predict_sklearn_probs(xgb_model, X_flat)
     cnn_prob     = predict_sequence_probs(cnn_ckpt,     "cnn_lstm", X_seq)
     gru_prob     = predict_sequence_probs(gru_ckpt,     "gru",      X_seq)
     cnn_gru_prob = predict_sequence_probs(cnn_gru_ckpt, "cnn_gru",  X_seq)
 
-    # Adaptive threshold 탐색 + 평가
     def eval_adaptive(y_true, y_prob):
         thr  = find_best_threshold(y_true, y_prob)
         pred = (y_prob >= thr).astype(int)
@@ -338,7 +338,7 @@ def stage2_ctu13_cross() -> dict:
         "cnn_gru":  eval_adaptive(y_seq,  cnn_gru_prob),
     }
 
-    print_table("2단계: CTU-13 교차검증 (Adaptive, Safety 2025)", [
+    print_table(f"2단계: CTU-13 교차검증 (Adaptive) [{AUGMENT}]", [
         row_from_metrics("RF",       results["rf"]),
         row_from_metrics("XGBoost",  results["xgb"]),
         row_from_metrics("CNN-LSTM", results["cnn_lstm"]),
@@ -353,22 +353,16 @@ def stage2_ctu13_cross() -> dict:
 # Recall 비교 출력
 # =========================================================
 def print_recall_comparison(stage1: dict, stage2: dict) -> None:
-    print("\n[Recall 비교] CIC2017 내부 → CTU-13 교차검증")
+    print(f"\n[Recall 비교] CIC2017 내부 → CTU-13 교차검증  [{AUGMENT}]")
     print(f"{'Model':<12} {'CIC2017 test':>13} {'CTU13 Adaptive':>15}")
     print("-" * 42)
-
-    model_map = {
-        "RF":       "rf",
-        "XGBoost":  "xgb",
-        "CNN-LSTM": "cnn_lstm",
-        "GRU":      "gru",
-        "CNN-GRU":  "cnn_gru",
-    }
-
-    for display, key in model_map.items():
-        cic_recall = stage1.get(key, {}).get("recall", 0.0)
-        ctu_recall = stage2.get(key, {}).get("recall", 0.0)
-        print(f"{display:<12} {cic_recall:>13.4f} {ctu_recall:>15.4f}")
+    for display, key in [
+        ("RF", "rf"), ("XGBoost", "xgb"),
+        ("CNN-LSTM", "cnn_lstm"), ("GRU", "gru"), ("CNN-GRU", "cnn_gru"),
+    ]:
+        cic = stage1.get(key, {}).get("recall", 0.0)
+        ctu = stage2.get(key, {}).get("recall", 0.0)
+        print(f"{display:<12} {cic:>13.4f} {ctu:>15.4f}")
 
 
 # =========================================================
@@ -376,6 +370,7 @@ def print_recall_comparison(stage1: dict, stage2: dict) -> None:
 # =========================================================
 def save_results(stage1: dict, stage2: dict) -> None:
     out = {
+        "augment":            AUGMENT,
         "stage1_cic_test":    stage1,
         "stage2_ctu13_cross": stage2,
     }
@@ -392,10 +387,10 @@ def main():
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 78)
-    print("  evaluate.py — CIC2017 학습 / CTU-13 교차검증 (Safety 2025)")
+    print(f"  evaluate.py — CIC2017 학습 / CTU-13 교차검증  [augment={AUGMENT}]")
     print("=" * 78)
-    print("  1단계: CIC2017 내부 test (CIC2017 val threshold 적용)")
-    print("  2단계: CTU-13 교차검증 (Scaler 정렬 + Adaptive threshold)")
+    print(f"  MODEL_DIR  = {MODEL_DIR}")
+    print(f"  RESULT_DIR = {RESULT_DIR}")
     print("=" * 78)
 
     stage1 = stage1_cic_test()
@@ -404,10 +399,7 @@ def main():
     print_recall_comparison(stage1, stage2)
     save_results(stage1, stage2)
 
-    print("\n[완료] artifacts/results/eval_results.json 저장됨")
-    print("\n[다음 단계]")
-    print("  WCGAN-GP로 CIC-IDS2017 Bot 클래스 증강")
-    print("  → 증강 후 재학습 → evaluate.py 재실행 → Before/After 비교")
+    print(f"\n[완료] {RESULT_DIR}/eval_results.json 저장됨")
 
 
 if __name__ == "__main__":
