@@ -17,25 +17,31 @@ from sklearn.metrics import (
 
 
 # =========================================================
-# 경로 설정
+# 증강 방식 설정
 # =========================================================
-_SRC_DIR   = Path(__file__).resolve().parent
-_PROJECT   = _SRC_DIR.parent
-_ROOT      = _PROJECT.parent
-
-MODEL_DIR  = _ROOT / "artifacts" / "models"
-RESULT_DIR = _ROOT / "artifacts" / "results"
-
-DATA_DIR = _PROJECT / "data" / "processed" / "cicids2017" / "flat"
-
-parser = argparse.ArgumentParser()
-parser.add_argument(
+_parser = argparse.ArgumentParser()
+_parser.add_argument(
     "--augment",
     type=str,
     default="none",
     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
 )
-AUGMENT = parser.parse_args().augment
+AUGMENT = _parser.parse_args().augment
+
+
+# =========================================================
+# 경로 설정
+# =========================================================
+_SRC_DIR  = Path(__file__).resolve().parent
+_PROJECT  = _SRC_DIR.parent
+_ROOT     = _PROJECT.parent
+
+_DATA_SUFFIX  = f"cicids2017_{AUGMENT}" if AUGMENT != "none" else "cicids2017"
+_MODEL_SUFFIX = f"_{AUGMENT}"           if AUGMENT != "none" else ""
+
+DATA_DIR   = _PROJECT / "data" / "processed" / _DATA_SUFFIX / "flat"
+MODEL_DIR  = _ROOT / "artifacts" / f"models{_MODEL_SUFFIX}" / "rf"
+RESULT_DIR = _ROOT / "artifacts" / f"results{_MODEL_SUFFIX}"
 
 
 def load_data(data_dir: Path):
@@ -169,9 +175,9 @@ def main():
     with open(RESULT_DIR / "rf_flow_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(val_metrics, f, indent=4, ensure_ascii=False)
 
-    print(f"\n[SAVED] artifacts/models/rf_flow.pkl")
-    print(f"[SAVED] artifacts/models/rf_full_threshold.json")
-    print(f"[SAVED] artifacts/results/rf_flow_val_metrics.json")
+    print(f"\n[SAVED] {MODEL_DIR}/rf_flow.pkl")
+    print(f"[SAVED] {MODEL_DIR}/rf_flow_threshold.json")
+    print(f"[SAVED] {RESULT_DIR}/rf_flow_val_metrics.json")
 
 
 if __name__ == "__main__":

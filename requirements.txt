@@ -7,6 +7,8 @@ scikit-learn==1.4.2
 xgboost==2.0.3
 
 # Deep Learning (CUDA 12.4)
+imbalanced-learn
+
 # torch, torchaudio, torchvision은 위 방법으로 별도 설치
 torch==2.6.0+cu124
 torchaudio==2.6.0+cu124

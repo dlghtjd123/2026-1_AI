@@ -1,7 +1,7 @@
+import argparse
 import copy
 import json
 import random
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -20,27 +20,36 @@ from torch.utils.data import DataLoader, Dataset
 
 
 # =========================================================
-# 경로 설정
+# 증강 방식 설정 — 경로보다 반드시 먼저 파싱
 # =========================================================
-_SRC_DIR   = Path(__file__).resolve().parent
-_PROJECT   = _SRC_DIR.parent
-_ROOT      = _PROJECT.parent
-
-MODEL_DIR  = _ROOT / "artifacts" / "models"
-RESULT_DIR = _ROOT / "artifacts" / "results"
-
-DATA_DIR = _PROJECT / "data" / "processed" / "cicids2017" / "seq"
-
-parser = argparse.ArgumentParser()
-parser.add_argument(
+_parser = argparse.ArgumentParser()
+_parser.add_argument(
     "--augment",
     type=str,
     default="none",
     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
 )
-AUGMENT = parser.parse_args().augment
+AUGMENT = _parser.parse_args().augment
 
 
+# =========================================================
+# 경로 설정 — AUGMENT 값에 따라 자동 변경
+# =========================================================
+_SRC_DIR  = Path(__file__).resolve().parent
+_PROJECT  = _SRC_DIR.parent
+_ROOT     = _PROJECT.parent
+
+_DATA_SUFFIX  = f"cicids2017_{AUGMENT}" if AUGMENT != "none" else "cicids2017"
+_MODEL_SUFFIX = f"_{AUGMENT}"           if AUGMENT != "none" else ""
+
+DATA_DIR   = _PROJECT / "data" / "processed" / _DATA_SUFFIX / "seq"
+MODEL_DIR  = _ROOT / "artifacts" / f"models{_MODEL_SUFFIX}" / "cnn_gru"
+RESULT_DIR = _ROOT / "artifacts" / f"results{_MODEL_SUFFIX}"
+
+
+# =========================================================
+# 유틸
+# =========================================================
 def set_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -60,6 +69,9 @@ class SequenceDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+# =========================================================
+# 모델
+# =========================================================
 class CNNGRUModel(nn.Module):
     def __init__(self, n_features, conv_channels=64, gru_hidden=64, dropout=0.3):
         super().__init__()
@@ -69,16 +81,14 @@ class CNNGRUModel(nn.Module):
             kernel_size=3,
             padding=1,
         )
-        self.relu = nn.ReLU()
+        self.relu    = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-
-        self.gru = nn.GRU(
+        self.gru     = nn.GRU(
             input_size=conv_channels,
             hidden_size=gru_hidden,
             num_layers=1,
             batch_first=True,
         )
-
         self.fc = nn.Linear(gru_hidden, 1)
 
     def forward(self, x):
@@ -86,12 +96,14 @@ class CNNGRUModel(nn.Module):
         x = self.relu(self.conv1(x))
         x = self.dropout(x)
         x = x.permute(0, 2, 1)
-
         _, h_n = self.gru(x)
         x = self.dropout(h_n[-1])
         return self.fc(x).squeeze(1)
 
 
+# =========================================================
+# 데이터 로드
+# =========================================================
 def load_data(data_dir: Path):
     X_train = np.load(data_dir / "X_train.npy")
     y_train = np.load(data_dir / "y_train.npy").astype(int)
@@ -100,6 +112,9 @@ def load_data(data_dir: Path):
     return X_train, y_train, X_val, y_val
 
 
+# =========================================================
+# 지표 계산
+# =========================================================
 def compute_metrics(y_true, y_pred, y_prob):
     metrics = {
         "accuracy":  float(accuracy_score(y_true, y_pred)),
@@ -121,46 +136,29 @@ def compute_metrics(y_true, y_pred, y_prob):
 def pick_best_threshold(y_true, y_prob):
     best = None
     best_threshold = 0.5
-    best_metrics = None
-
-    thresholds = np.arange(0.05, 0.96, 0.01)
+    best_metrics   = None
+    thresholds     = np.arange(0.05, 0.96, 0.01)
 
     for threshold in thresholds:
-        y_pred = (y_prob >= threshold).astype(int)
+        y_pred  = (y_prob >= threshold).astype(int)
         metrics = compute_metrics(y_true, y_pred, y_prob)
-
-        # Recall을 너무 낮게 만드는 threshold는 제외
         if metrics["recall"] < 0.8:
             continue
-
-        candidate = (
-            metrics["f1"],
-            metrics["precision"],
-            -threshold,
-        )
-
+        candidate = (metrics["f1"], metrics["precision"], -threshold)
         if best is None or candidate > best:
-            best = candidate
+            best           = candidate
             best_threshold = float(round(threshold, 4))
-            best_metrics = metrics
+            best_metrics   = metrics
 
-    # recall >= 0.8을 만족하는 threshold가 없을 경우 fallback
     if best_metrics is None:
         for threshold in thresholds:
-            y_pred = (y_prob >= threshold).astype(int)
-            metrics = compute_metrics(y_true, y_pred, y_prob)
-
-            candidate = (
-                metrics["recall"],
-                metrics["f1"],
-                metrics["precision"],
-                -threshold,
-            )
-
+            y_pred    = (y_prob >= threshold).astype(int)
+            metrics   = compute_metrics(y_true, y_pred, y_prob)
+            candidate = (metrics["recall"], metrics["f1"], metrics["precision"], -threshold)
             if best is None or candidate > best:
-                best = candidate
+                best           = candidate
                 best_threshold = float(round(threshold, 4))
-                best_metrics = metrics
+                best_metrics   = metrics
 
     best_metrics["selected_threshold"] = best_threshold
     return best_threshold, best_metrics
@@ -170,7 +168,6 @@ def collect_probs_and_loss(model, loader, device, criterion):
     model.eval()
     total_loss = 0.0
     y_true_all, y_prob_all = [], []
-
     with torch.no_grad():
         for X_batch, y_batch in loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
@@ -179,7 +176,6 @@ def collect_probs_and_loss(model, loader, device, criterion):
             total_loss += criterion(logits, y_batch).item() * X_batch.size(0)
             y_true_all.extend(y_batch.cpu().numpy().tolist())
             y_prob_all.extend(probs.cpu().numpy().tolist())
-
     return (
         total_loss / len(loader.dataset),
         np.array(y_true_all).astype(int),
@@ -205,12 +201,18 @@ def print_metrics(name, metrics, loss=None):
     print(np.array(metrics["confusion_matrix"]))
 
 
+# =========================================================
+# 메인
+# =========================================================
 def main():
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"[CONFIG] data   : {DATA_DIR}")
-    print(f"[INFO]   device : {device}")
+    print(f"[CONFIG] AUGMENT    : {AUGMENT}")
+    print(f"[CONFIG] DATA_DIR   : {DATA_DIR}")
+    print(f"[CONFIG] MODEL_DIR  : {MODEL_DIR}")
+    print(f"[CONFIG] RESULT_DIR : {RESULT_DIR}")
+    print(f"[INFO]   device     : {device}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
@@ -229,10 +231,7 @@ def main():
     )
 
     model = CNNGRUModel(
-        n_features=n_features,
-        conv_channels=64,
-        gru_hidden=64,
-        dropout=0.3,
+        n_features=n_features, conv_channels=64, gru_hidden=64, dropout=0.3
     ).to(device)
 
     pos_count        = np.sum(y_train == 1)
@@ -257,7 +256,6 @@ def main():
     for epoch in range(1, num_epochs + 1):
         model.train()
         running_loss = 0.0
-
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
@@ -310,6 +308,7 @@ def main():
     print(f"\n[INFO] Best epoch: {best_epoch}")
     print_metrics("CNN-GRU Validation", best_val_metrics, loss=best_val_loss)
 
+    # 저장 — MODEL_DIR = artifacts/models{suffix}/cnn_gru/
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -322,15 +321,15 @@ def main():
         MODEL_DIR / "cnn_gru_flow.pt",
     )
 
-    with open(MODEL_DIR / "cnn_gru_flow_threshold.json", "w", encoding="utf-8") as f:
+    with open(MODEL_DIR  / "cnn_gru_flow_threshold.json",  "w", encoding="utf-8") as f:
         json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
 
     with open(RESULT_DIR / "cnn_gru_flow_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(best_val_metrics, f, indent=4, ensure_ascii=False)
 
-    print(f"\n[SAVED] artifacts/models/cnn_gru_flow.pt")
-    print(f"[SAVED] artifacts/models/cnn_gru_flow_threshold.json")
-    print(f"[SAVED] artifacts/results/cnn_gru_flow_val_metrics.json")
+    print(f"\n[SAVED] {MODEL_DIR}/cnn_gru_flow.pt")
+    print(f"[SAVED] {MODEL_DIR}/cnn_gru_flow_threshold.json")
+    print(f"[SAVED] {RESULT_DIR}/cnn_gru_flow_val_metrics.json")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,13 @@
 """
 visualize.py
 
-eval_results.json을 읽어 성능 비교 시각화
+ROC-AUC centered visualization (primary metric)
+Secondary: F1 @ Youden's J threshold
 
-사용법:
-  python visualize.py                    # Baseline
+Output: artifacts/results{suffix}/figures/
+
+Usage:
+  python visualize.py
   python visualize.py --augment smote
   python visualize.py --augment gan
   python visualize.py --augment wgan_gp
@@ -20,7 +23,7 @@ import numpy as np
 
 
 # =========================================================
-# --augment 인자 파싱
+# --augment argument
 # =========================================================
 _parser = argparse.ArgumentParser()
 _parser.add_argument(
@@ -28,29 +31,27 @@ _parser.add_argument(
     type=str,
     default="none",
     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
-    help="사용할 증강 방식 (default: none)",
 )
 AUGMENT = _parser.parse_args().augment
 
 
 # =========================================================
-# 경로 설정 — AUGMENT 값에 따라 자동 변경
+# Paths
 # =========================================================
 _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
 _ROOT     = _PROJECT.parent
 
 _SUFFIX    = f"_{AUGMENT}" if AUGMENT != "none" else ""
-
 RESULT_DIR = _ROOT / "artifacts" / f"results{_SUFFIX}"
-FIGURE_DIR = RESULT_DIR / "figures"
+FIGURE_DIR = RESULT_DIR / "total_figures"
 FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
 EVAL_PATH  = RESULT_DIR / "eval_results.json"
 
 
 # =========================================================
-# 스타일 설정
+# Style
 # =========================================================
 plt.rcParams.update({
     "font.family":    "DejaVu Sans",
@@ -60,20 +61,15 @@ plt.rcParams.update({
     "figure.dpi":     150,
 })
 
+MODELS    = ["RF", "XGBoost", "CNN-LSTM", "GRU", "CNN-GRU"]
+MODEL_KEY = ["rf", "xgb", "cnn_lstm", "gru", "cnn_gru"]
+
 COLORS = {
     "RF":       "#4C72B0",
     "XGBoost":  "#DD8452",
     "CNN-LSTM": "#55A868",
     "GRU":      "#C44E52",
     "CNN-GRU":  "#8172B2",
-}
-
-METRIC_LABELS = {
-    "accuracy":  "Accuracy",
-    "precision": "Precision",
-    "recall":    "Recall",
-    "f1":        "F1-Score",
-    "roc_auc":   "ROC-AUC",
 }
 
 AUGMENT_LABEL = {
@@ -84,77 +80,80 @@ AUGMENT_LABEL = {
     "wcgan_gp": "WCGAN-GP",
 }.get(AUGMENT, AUGMENT)
 
+DATASET_COLORS = {
+    "CIC2017": "#4878D0",
+    "CIC2018": "#EE854A",
+    "CTU-13":  "#6ACC65",
+}
+
 
 # =========================================================
-# 데이터 로드 및 파싱
+# Data loading
 # =========================================================
 def load_results() -> dict:
     with open(EVAL_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def extract_models(results: dict, stage_key: str) -> dict:
-    stage = results[stage_key]
+def extract_stage(results: dict, stage_key: str) -> dict:
+    stage = results.get(stage_key, {})
     name_map = {
-        "rf":       "RF",
-        "xgb":      "XGBoost",
-        "cnn_lstm": "CNN-LSTM",
-        "gru":      "GRU",
-        "cnn_gru":  "CNN-GRU",
+        "rf": "RF", "xgb": "XGBoost",
+        "cnn_lstm": "CNN-LSTM", "gru": "GRU", "cnn_gru": "CNN-GRU",
     }
     return {name_map[k]: v for k, v in stage.items() if k in name_map}
 
 
-# =========================================================
-# 1. 막대 그래프
-# =========================================================
-def plot_bar_comparison(
-    data:     dict,
-    title:    str,
-    filename: str,
-    metrics:  list[str] = None,
-) -> None:
-    if metrics is None:
-        metrics = ["precision", "recall", "f1", "roc_auc"]
+def get_val(data: dict, model: str, metric: str, default=0.0):
+    return data.get(model, {}).get(metric) or default
 
-    models      = list(data.keys())
-    n_models    = len(models)
-    x           = np.arange(len(metrics))
-    group_width = 0.8
-    width       = group_width / n_models
-    offsets     = np.linspace(
-        -group_width / 2 + width / 2,
-        group_width / 2 - width / 2,
-        n_models,
-    )
+
+# =========================================================
+# 1. ROC-AUC Bar Comparison (Primary Chart)
+# =========================================================
+def plot_roc_auc_comparison(
+    cic17_data: dict,
+    cic18_data: dict,
+    ctu_data:   dict,
+    filename:   str,
+) -> None:
+    x     = np.arange(len(MODELS))
+    width = 0.25
+
+    cic17_auc = [get_val(cic17_data, m, "roc_auc") for m in MODELS]
+    cic18_auc = [get_val(cic18_data, m, "roc_auc") for m in MODELS]
+    ctu_auc   = [get_val(ctu_data,   m, "roc_auc") for m in MODELS]
 
     fig, ax = plt.subplots(figsize=(13, 6))
-    for i, model in enumerate(models):
-        values = [data[model].get(m, 0) or 0 for m in metrics]
-        bars   = ax.bar(
-            x + offsets[i], values,
-            width=width,
-            color=COLORS.get(model, "#999999"),
-            label=model,
-            alpha=0.85,
-            edgecolor="white",
-            linewidth=0.5,
-        )
-        for bar, v in zip(bars, values):
+
+    b1 = ax.bar(x - width, cic17_auc, width,
+                label="CIC-IDS2017 (Internal)", color=DATASET_COLORS["CIC2017"], alpha=0.85)
+    b2 = ax.bar(x,         cic18_auc, width,
+                label="CIC-IDS2018 (Cross)",   color=DATASET_COLORS["CIC2018"], alpha=0.85)
+    b3 = ax.bar(x + width, ctu_auc,   width,
+                label="CTU-13 (Cross)",         color=DATASET_COLORS["CTU-13"],  alpha=0.85)
+
+    for bars in [b1, b2, b3]:
+        for bar in bars:
+            h = bar.get_height()
             ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.01,
-                f"{v:.3f}",
-                ha="center", va="bottom",
-                fontsize=6.5,
+                bar.get_x() + bar.get_width() / 2, h + 0.005,
+                f"{h:.3f}", ha="center", va="bottom", fontsize=8
             )
 
+    ax.axhline(0.5, color="red",  linestyle="--", linewidth=1.2, label="Random (0.5)")
+    ax.axhline(0.7, color="gray", linestyle=":",  linewidth=1.0, label="Good (0.7)")
+    ax.axhline(0.9, color="gray", linestyle="-.", linewidth=1.0, label="Excellent (0.9)")
+
     ax.set_xticks(x)
-    ax.set_xticklabels([METRIC_LABELS[m] for m in metrics])
-    ax.set_ylim(0, 1.15)
-    ax.set_ylabel("Score")
-    ax.set_title(title)
-    ax.legend(loc="upper right")
+    ax.set_xticklabels(MODELS)
+    ax.set_ylim(0, 1.12)
+    ax.set_ylabel("ROC-AUC")
+    ax.set_title(
+        f"ROC-AUC Comparison (Primary Metric) — [{AUGMENT_LABEL}]\n"
+        f"CIC-IDS2017 (Internal) vs CIC-IDS2018 / CTU-13 (Cross-Dataset)"
+    )
+    ax.legend(loc="lower right", fontsize=9)
     ax.grid(axis="y", alpha=0.3)
     ax.spines[["top", "right"]].set_visible(False)
 
@@ -166,46 +165,90 @@ def plot_bar_comparison(
 
 
 # =========================================================
-# 2. 히트맵
+# 2. F1 Bar Comparison (Secondary Chart, Youden's J)
 # =========================================================
-def plot_heatmap_comparison(
+def plot_f1_comparison(
     cic17_data: dict,
+    cic18_data: dict,
     ctu_data:   dict,
     filename:   str,
 ) -> None:
-    models  = list(cic17_data.keys())
-    metrics = ["precision", "recall", "f1", "roc_auc"]
+    x     = np.arange(len(MODELS))
+    width = 0.25
 
-    vals17  = np.array([[cic17_data[m].get(mt, 0) or 0 for mt in metrics] for m in models])
-    vals_ctu = np.array([[ctu_data[m].get(mt, 0) or 0 for mt in metrics] for m in models])
+    cic17_f1 = [get_val(cic17_data, m, "f1") for m in MODELS]
+    cic18_f1 = [get_val(cic18_data, m, "f1") for m in MODELS]
+    ctu_f1   = [get_val(ctu_data,   m, "f1") for m in MODELS]
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
-    for ax, vals, title in zip(
-        axes,
-        [vals17, vals_ctu],
-        [
-            f"Stage 1: CIC-IDS2017 [{AUGMENT_LABEL}]",
-            f"Stage 2: CTU-13 Cross [{AUGMENT_LABEL}]",
-        ],
-    ):
-        im = ax.imshow(vals, cmap="YlOrRd", vmin=0, vmax=1, aspect="auto")
-        ax.set_xticks(range(len(metrics)))
-        ax.set_xticklabels([METRIC_LABELS[m] for m in metrics])
-        ax.set_yticks(range(len(models)))
-        ax.set_yticklabels(models)
-        ax.set_title(title)
-        for i in range(len(models)):
-            for j in range(len(metrics)):
-                v = vals[i, j]
-                ax.text(j, i, f"{v:.3f}", ha="center", va="center",
-                        fontsize=10,
-                        color="black" if v < 0.6 else "white",
-                        fontweight="bold")
+    fig, ax = plt.subplots(figsize=(13, 6))
 
-    plt.colorbar(im, ax=axes[-1], label="Score")
-    plt.suptitle(
-        f"Model Performance: CIC-IDS2017 vs CTU-13  [{AUGMENT_LABEL}]",
-        fontsize=13, y=1.02,
+    b1 = ax.bar(x - width, cic17_f1, width,
+                label="CIC-IDS2017 (Internal)", color=DATASET_COLORS["CIC2017"], alpha=0.85)
+    b2 = ax.bar(x,         cic18_f1, width,
+                label="CIC-IDS2018 (Cross)",   color=DATASET_COLORS["CIC2018"], alpha=0.85)
+    b3 = ax.bar(x + width, ctu_f1,   width,
+                label="CTU-13 (Cross)",         color=DATASET_COLORS["CTU-13"],  alpha=0.85)
+
+    for bars in [b1, b2, b3]:
+        for bar in bars:
+            h = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2, h + 0.005,
+                f"{h:.3f}", ha="center", va="bottom", fontsize=8
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(MODELS)
+    ax.set_ylim(0, 1.12)
+    ax.set_ylabel("F1-Score")
+    ax.set_title(
+        f"F1-Score Comparison (Secondary Metric, Youden's J Threshold) — [{AUGMENT_LABEL}]"
+    )
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    ax.spines[["top", "right"]].set_visible(False)
+
+    plt.tight_layout()
+    path = FIGURE_DIR / filename
+    plt.savefig(path, bbox_inches="tight")
+    plt.close()
+    print(f"[SAVED] {path}")
+
+
+# =========================================================
+# 3. ROC-AUC Heatmap
+# =========================================================
+def plot_roc_auc_heatmap(
+    cic17_data: dict,
+    cic18_data: dict,
+    ctu_data:   dict,
+    filename:   str,
+) -> None:
+    datasets = ["CIC-IDS2017\n(Internal)", "CIC-IDS2018\n(Cross)", "CTU-13\n(Cross)"]
+    matrix   = np.array([
+        [get_val(d, m, "roc_auc") for m in MODELS]
+        for d in [cic17_data, cic18_data, ctu_data]
+    ])
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    im = ax.imshow(matrix, cmap="RdYlGn", vmin=0.5, vmax=1.0, aspect="auto")
+
+    ax.set_xticks(range(len(MODELS)))
+    ax.set_xticklabels(MODELS)
+    ax.set_yticks(range(len(datasets)))
+    ax.set_yticklabels(datasets)
+
+    for i in range(len(datasets)):
+        for j in range(len(MODELS)):
+            v = matrix[i, j]
+            ax.text(j, i, f"{v:.3f}",
+                    ha="center", va="center", fontsize=11, fontweight="bold",
+                    color="black" if v < 0.75 else "white")
+
+    plt.colorbar(im, ax=ax, label="ROC-AUC")
+    ax.set_title(
+        f"ROC-AUC Heatmap [{AUGMENT_LABEL}]  "
+        f"(Green=Excellent / Red=Random-level)"
     )
     plt.tight_layout()
     path = FIGURE_DIR / filename
@@ -215,50 +258,48 @@ def plot_heatmap_comparison(
 
 
 # =========================================================
-# 3. Recall / F1 비교
+# 4. ROC-AUC Drop Line Chart (Domain Shift Visualization)
 # =========================================================
-def plot_recall_focus(
+def plot_roc_auc_drop(
     cic17_data: dict,
+    cic18_data: dict,
     ctu_data:   dict,
     filename:   str,
 ) -> None:
-    models = list(cic17_data.keys())
-    cic17_recall = [cic17_data[m].get("recall", 0) or 0 for m in models]
-    ctu_recall   = [ctu_data[m].get("recall",   0) or 0 for m in models]
-    cic17_f1     = [cic17_data[m].get("f1", 0) or 0 for m in models]
-    ctu_f1       = [ctu_data[m].get("f1",   0) or 0 for m in models]
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    x     = np.arange(len(models))
-    width = 0.3
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    x_labels = ["CIC-IDS2017\n(Internal)", "CIC-IDS2018\n(Cross)", "CTU-13\n(Cross)"]
+    x_pos    = [0, 1, 2]
 
-    for ax, c17_vals, ctu_vals, ylabel, title in zip(
-        axes,
-        [cic17_recall, cic17_f1],
-        [ctu_recall,   ctu_f1],
-        ["Recall (Botnet Detection Rate)", "F1-Score"],
-        [f"Recall [{AUGMENT_LABEL}]", f"F1-Score [{AUGMENT_LABEL}]"],
-    ):
-        ax.bar(x - width / 2, c17_vals, width,
-               label="CIC-IDS2017 (Internal)", color="#4878D0", alpha=0.85)
-        ax.bar(x + width / 2, ctu_vals, width,
-               label="CTU-13 (Cross, Adaptive)", color="#6ACC65", alpha=0.85)
-        for i, (c17, ctu) in enumerate(zip(c17_vals, ctu_vals)):
-            ax.text(i - width / 2, c17 + 0.02, f"{c17:.3f}", ha="center", fontsize=9)
-            ax.text(i + width / 2, ctu + 0.02, f"{ctu:.3f}", ha="center", fontsize=9)
-        ax.set_xticks(x)
-        ax.set_xticklabels(models)
-        ax.set_ylim(0, 1.2)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.legend()
-        ax.grid(axis="y", alpha=0.3)
-        ax.spines[["top", "right"]].set_visible(False)
+    for model in MODELS:
+        c17 = get_val(cic17_data, model, "roc_auc")
+        c18 = get_val(cic18_data, model, "roc_auc")
+        ctu = get_val(ctu_data,   model, "roc_auc")
 
-    plt.suptitle(
-        f"Botnet Detection: CIC-IDS2017 vs CTU-13  [{AUGMENT_LABEL}]",
-        fontsize=12,
+        vals = [c17, c18, ctu]
+        ax.plot(x_pos, vals, marker="o", linewidth=2,
+                label=model, color=COLORS[model])
+        for xi, v in zip(x_pos, vals):
+            ax.text(xi, v + 0.012, f"{v:.3f}", ha="center", fontsize=8,
+                    color=COLORS[model])
+
+    ax.axhline(0.5, color="red",  linestyle="--", linewidth=1.2, alpha=0.7,
+               label="Random baseline (0.5)")
+    ax.axhline(0.7, color="gray", linestyle=":",  linewidth=1.0, alpha=0.7,
+               label="Good threshold (0.7)")
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(x_labels, fontsize=12)
+    ax.set_ylim(0.3, 1.05)
+    ax.set_ylabel("ROC-AUC")
+    ax.set_title(
+        f"ROC-AUC Degradation: Internal -> Cross-Dataset [{AUGMENT_LABEL}]\n"
+        f"(Domain Shift Impact Visualization)"
     )
+    ax.legend(loc="lower left", fontsize=9)
+    ax.grid(alpha=0.3)
+    ax.spines[["top", "right"]].set_visible(False)
+
     plt.tight_layout()
     path = FIGURE_DIR / filename
     plt.savefig(path, bbox_inches="tight")
@@ -267,15 +308,14 @@ def plot_recall_focus(
 
 
 # =========================================================
-# 4. Confusion Matrix
+# 5. Confusion Matrix
 # =========================================================
-def plot_confusion_matrices(
-    data:         dict,
-    title_prefix: str,
-    filename:     str,
-) -> None:
-    models = list(data.keys())
+def plot_confusion_matrices(data: dict, title_prefix: str, filename: str) -> None:
+    models = [m for m in MODELS if m in data]
     n      = len(models)
+    if n == 0:
+        return
+
     fig, axes = plt.subplots(1, n, figsize=(4 * n, 4))
     if n == 1:
         axes = [axes]
@@ -295,7 +335,7 @@ def plot_confusion_matrices(
             for j in range(2):
                 v = cm[i, j]
                 ax.text(j, i, f"{v:,}\n({v / total * 100:.1f}%)",
-                        ha="center", va="center", fontsize=10,
+                        ha="center", va="center", fontsize=9,
                         color="white" if v > cm.max() * 0.5 else "black",
                         fontweight="bold")
 
@@ -307,38 +347,54 @@ def plot_confusion_matrices(
 
 
 # =========================================================
-# 5. Threshold 비교
+# 6. Recall & Precision Comparison (Supplementary)
 # =========================================================
-def plot_threshold_comparison(
+def plot_recall_precision(
     cic17_data: dict,
+    cic18_data: dict,
     ctu_data:   dict,
     filename:   str,
 ) -> None:
-    models    = list(cic17_data.keys())
-    cic17_thr = [cic17_data[m].get("threshold", 0.5) or 0.5 for m in models]
-    ctu_thr   = [ctu_data[m].get("threshold",   0.5) or 0.5 for m in models]
+    x     = np.arange(len(MODELS))
+    width = 0.25
 
-    x     = np.arange(len(models))
-    width = 0.3
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(x - width / 2, cic17_thr, width,
-           label="CIC-IDS2017 (val threshold)", color="#4878D0", alpha=0.85)
-    ax.bar(x + width / 2, ctu_thr,   width,
-           label="CTU-13 (adaptive threshold)", color="#6ACC65", alpha=0.85)
-    for i, (c17, ctu) in enumerate(zip(cic17_thr, ctu_thr)):
-        ax.text(i - width / 2, c17 + 0.01, f"{c17:.3f}", ha="center", fontsize=9)
-        ax.text(i + width / 2, ctu + 0.01, f"{ctu:.3f}", ha="center", fontsize=9)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(models)
-    ax.set_ylim(0, 1.1)
-    ax.set_ylabel("Threshold")
-    ax.set_title(f"Threshold Comparison  [{AUGMENT_LABEL}]")
-    ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="default (0.5)")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
-    ax.spines[["top", "right"]].set_visible(False)
+    for ax, metric, ylabel, title in zip(
+        axes,
+        ["recall",    "precision"],
+        ["Recall (Botnet Detection Rate)", "Precision"],
+        [f"Recall [{AUGMENT_LABEL}]",      f"Precision [{AUGMENT_LABEL}]"],
+    ):
+        c17 = [get_val(cic17_data, m, metric) for m in MODELS]
+        c18 = [get_val(cic18_data, m, metric) for m in MODELS]
+        ctu = [get_val(ctu_data,   m, metric) for m in MODELS]
 
+        ax.bar(x - width, c17, width, label="CIC-IDS2017",
+               color=DATASET_COLORS["CIC2017"], alpha=0.85)
+        ax.bar(x,         c18, width, label="CIC-IDS2018",
+               color=DATASET_COLORS["CIC2018"], alpha=0.85)
+        ax.bar(x + width, ctu, width, label="CTU-13",
+               color=DATASET_COLORS["CTU-13"],  alpha=0.85)
+
+        for vals, offset in [(c17, -width), (c18, 0), (ctu, width)]:
+            for i, v in enumerate(vals):
+                ax.text(i + offset, v + 0.01, f"{v:.2f}",
+                        ha="center", fontsize=7.5)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(MODELS)
+        ax.set_ylim(0, 1.15)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend(fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    plt.suptitle(
+        f"Botnet Detection: Recall & Precision — [{AUGMENT_LABEL}]",
+        fontsize=12
+    )
     plt.tight_layout()
     path = FIGURE_DIR / filename
     plt.savefig(path, bbox_inches="tight")
@@ -347,37 +403,25 @@ def plot_threshold_comparison(
 
 
 # =========================================================
-# 요약 테이블 콘솔 출력
+# Summary print
 # =========================================================
-def print_summary_table(cic17_data: dict, ctu_data: dict) -> None:
-    models = list(cic17_data.keys())
-    print("\n" + "=" * 100)
-    print(f"  Performance Summary [{AUGMENT_LABEL}]: CIC-IDS2017 vs CTU-13")
-    print("=" * 100)
-    print(
-        f"{'Model':<12} {'Dataset':<16} {'Threshold':>10} {'Precision':>10} "
-        f"{'Recall':>8} {'F1':>8} {'ROC-AUC':>9} {'TP':>7} {'FP':>7} {'FN':>7} {'TN':>7}"
-    )
-    print("-" * 100)
-    for model in models:
-        for label, data in [("CIC-IDS2017", cic17_data), ("CTU-13", ctu_data)]:
-            d   = data[model]
-            cm  = np.array(d["confusion_matrix"])
-            tn, fp, fn, tp = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
-            roc = f"{d['roc_auc']:.4f}" if d.get("roc_auc") is not None else "  None"
-            thr = f"{d.get('threshold'):.4f}" if isinstance(d.get("threshold"), float) else "  -"
-            print(
-                f"{model:<12} {label:<16} {thr:>10} "
-                f"{d['precision']:>10.4f} {d['recall']:>8.4f} {d['f1']:>8.4f} "
-                f"{roc:>9} {tp:>7,} {fp:>7,} {fn:>7,} {tn:>7,}"
-            )
-        print("-" * 100)
-    print("=" * 100)
-    print("  TP=봇넷 정탐 / FP=정상 오탐 / FN=봇넷 미탐 / TN=정상 정탐")
+def print_summary(cic17_data: dict, cic18_data: dict, ctu_data: dict) -> None:
+    print(f"\n{'='*60}")
+    print(f"  ROC-AUC Summary [{AUGMENT_LABEL}]")
+    print(f"{'='*60}")
+    print(f"{'Model':<12} {'CIC2017':>9} {'CIC2018':>9} {'CTU-13':>9}")
+    print("-" * 42)
+    for model in MODELS:
+        c17 = get_val(cic17_data, model, "roc_auc")
+        c18 = get_val(cic18_data, model, "roc_auc")
+        ctu = get_val(ctu_data,   model, "roc_auc")
+        c18_s = f"{c18:.4f}" if c18 else "  N/A"
+        print(f"{model:<12} {c17:>9.4f} {c18_s:>9} {ctu:>9.4f}")
+    print("=" * 60)
 
 
 # =========================================================
-# 메인
+# Main
 # =========================================================
 def main():
     print(f"=== visualize.py  [augment={AUGMENT}] ===")
@@ -385,36 +429,64 @@ def main():
     print(f"[SAVE] {FIGURE_DIR}")
 
     results    = load_results()
-    cic17_data = extract_models(results, "stage1_cic_test")
-    ctu_data   = extract_models(results, "stage2_ctu13_cross")
+    cic17_data = extract_stage(results, "stage1_cic_test")
+    cic18_data = extract_stage(results, "stage2_cic2018_cross")
+    ctu_data   = extract_stage(results, "stage3_ctu13_cross")
 
-    print_summary_table(cic17_data, ctu_data)
+    print_summary(cic17_data, cic18_data, ctu_data)
 
-    plot_bar_comparison(
-        cic17_data,
-        title=f"Stage 1: CIC-IDS2017 Internal Test [{AUGMENT_LABEL}]",
-        filename="01_cic17_bar.png",
+    # 1. ROC-AUC bar chart (primary)
+    plot_roc_auc_comparison(
+        cic17_data, cic18_data, ctu_data,
+        filename="01_roc_auc_comparison.png",
     )
-    plot_bar_comparison(
-        ctu_data,
-        title=f"Stage 2: CTU-13 Cross-Dataset [{AUGMENT_LABEL}]",
-        filename="02_ctu13_bar.png",
+
+    # 2. ROC-AUC heatmap
+    plot_roc_auc_heatmap(
+        cic17_data, cic18_data, ctu_data,
+        filename="02_roc_auc_heatmap.png",
     )
-    plot_heatmap_comparison(cic17_data, ctu_data, filename="03_heatmap.png")
-    plot_recall_focus(cic17_data, ctu_data, filename="04_recall_f1.png")
+
+    # 3. ROC-AUC drop line chart
+    plot_roc_auc_drop(
+        cic17_data, cic18_data, ctu_data,
+        filename="03_roc_auc_drop.png",
+    )
+
+    # 4. F1 bar chart (secondary)
+    plot_f1_comparison(
+        cic17_data, cic18_data, ctu_data,
+        filename="04_f1_comparison.png",
+    )
+
+    # 5. Recall & Precision (supplementary)
+    plot_recall_precision(
+        cic17_data, cic18_data, ctu_data,
+        filename="05_recall_precision.png",
+    )
+
+    # 6. Confusion Matrix — CIC-IDS2017
     plot_confusion_matrices(
         cic17_data,
         title_prefix=f"CIC-IDS2017 [{AUGMENT_LABEL}]",
-        filename="05_cm_cic17.png",
+        filename="06_cm_cic17.png",
     )
+
+    # 7. Confusion Matrix — CTU-13
     plot_confusion_matrices(
         ctu_data,
         title_prefix=f"CTU-13 [{AUGMENT_LABEL}]",
-        filename="06_cm_ctu13.png",
+        filename="07_cm_ctu13.png",
     )
-    plot_threshold_comparison(cic17_data, ctu_data, filename="07_threshold_compare.png")
 
     print(f"\n[Done] {FIGURE_DIR}")
+    print("  01_roc_auc_comparison.png  <- Primary chart")
+    print("  02_roc_auc_heatmap.png     <- ROC-AUC heatmap")
+    print("  03_roc_auc_drop.png        <- Domain shift visualization")
+    print("  04_f1_comparison.png       <- F1 secondary chart")
+    print("  05_recall_precision.png    <- Recall & Precision")
+    print("  06_cm_cic17.png            <- Confusion Matrix")
+    print("  07_cm_ctu13.png            <- Confusion Matrix")
 
 
 if __name__ == "__main__":

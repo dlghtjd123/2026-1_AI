@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 
 
 # =========================================================
@@ -595,7 +595,9 @@ def main():
     n_feat = len(ML_FEATURES)
 
     # ── Scaler: train 기준 fit, val/test는 transform ──────
-    scaler = StandardScaler()
+    # MinMaxScaler → [0, 1] 고정
+    # D'Hooge et al. (2020): MinMaxScaler가 cross-dataset 성능에 중요
+    scaler = MinMaxScaler()
     X_tr   = scaler.fit_transform(X_tr).astype(np.float32)
     X_va   = scaler.transform(X_va).astype(np.float32)
     X_te   = scaler.transform(X_te).astype(np.float32)

@@ -7,10 +7,11 @@ CTU-13 시나리오 9 전처리 — 논문 방식 (Safety 2025 동일)
   - RF / XGBoost : (n_flows, n_features)
   - CNN-LSTM/GRU : (n_flows, n_features, 1)
 
-Scaler 방식 (Safety 2025):
-  ① CIC-IDS2017 scaler transform only (fit 금지)
-  ② Secondary StandardScaler (CTU-13 분포 재정렬)
+Scaler 방식 (D'Hooge et al., 2020 + Safety 2025):
+  ① CIC-IDS2017 MinMaxScaler transform only (fit 금지)
+  ② Secondary MinMaxScaler (CTU-13 분포 재정렬)
      → 두 데이터셋 간 feature 분포 mismatch 감소
+     → 최종 범위 [0, 1] 유지 → threshold 0.5 유효
      → 논문 작성 시 "target dataset 통계 사용" 명시 필요
 
 라벨 방식:
@@ -28,7 +29,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 
 
 # =========================================================
@@ -293,15 +294,21 @@ def apply_log_transform(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# 6. Scaler 적용 — Safety 2025 방식
-#    ① CIC2017 scaler transform (fit 금지)
-#    ② Secondary StandardScaler (CTU-13 분포 재정렬)
+# 6. Scaler 적용
+#    ① CIC2017 MinMaxScaler transform (fit 금지)
+#    ② Secondary MinMaxScaler (CTU-13 분포 재정렬)
+#       → 최종 범위 [0, 1] 유지 → threshold 0.5 유효
 # =========================================================
 def apply_scaler_with_alignment(X: np.ndarray) -> tuple[np.ndarray, object]:
     """
-    Safety 2025 의 scaler realignment 방식 적용
+    D'Hooge et al. (2020) + Safety 2025 scaler realignment 방식
+
+    ① CIC2017 MinMaxScaler → [0, 1] 변환
+    ② Secondary MinMaxScaler → CTU-13 분포 기준 재정렬 후 [0, 1] 유지
+
     논문 작성 시 명시:
-      "target dataset 통계를 사용한 secondary standardization 적용
+      "MinMaxScaler (D'Hooge et al., 2020) 적용 후
+       target dataset 통계를 사용한 secondary MinMaxScaler 적용
        (Safety 2025 방식) — Strict zero-shot 아님"
     """
     if not SCALER_PATH.exists():
@@ -310,19 +317,20 @@ def apply_scaler_with_alignment(X: np.ndarray) -> tuple[np.ndarray, object]:
             "먼저 preprocess_cicids2017.py 를 실행하세요."
         )
 
-    # ① CIC2017 scaler
+    # ① CIC2017 MinMaxScaler
     cic_scaler = joblib.load(SCALER_PATH)
-    print(f"\n[SCALER] CIC-IDS2017 scaler 로드: {SCALER_PATH}")
+    print(f"\n[SCALER] CIC-IDS2017 MinMaxScaler 로드: {SCALER_PATH}")
     X_scaled = cic_scaler.transform(X).astype(np.float32)
 
-    # ② CTU-13 분포 재정렬
-    aligner  = StandardScaler()
+    # ② Secondary MinMaxScaler — CTU-13 분포 재정렬 + [0,1] 유지
+    aligner   = MinMaxScaler()
     X_aligned = aligner.fit_transform(X_scaled).astype(np.float32)
 
     aligner_path = SAVE_ROOT / "aligner.pkl"
     joblib.dump(aligner, aligner_path)
 
-    print(f"[ALIGN] CTU-13 분포 재정렬 완료")
+    print(f"[ALIGN] CTU-13 Secondary MinMaxScaler 완료")
+    print(f"[ALIGN] 최종 범위: [{X_aligned.min():.4f}, {X_aligned.max():.4f}]")
     print(f"[ALIGN] aligner 저장: {aligner_path}")
     print(f"[SCALER] 최종 shape: {X_aligned.shape}")
 
@@ -361,7 +369,7 @@ def save_outputs(
             "mode":         "flow_based",
             "description":  "flow 1개 = 샘플 1개 (논문들과 동일)",
             "background":   "non-botnet IP → Normal(0) 처리 (구분 불가)",
-            "scaler":       "CIC2017 scaler + secondary StandardScaler (Safety 2025)",
+            "scaler":       "CIC2017 MinMaxScaler + secondary MinMaxScaler (D'Hooge + Safety 2025)",
         },
         "scaler_path":   str(SCALER_PATH),
         "num_features":  n_feat,

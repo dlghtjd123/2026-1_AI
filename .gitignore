@@ -23,7 +23,7 @@ Thumbs.db
 
 # Data
 project/data/raw/
-data/processed/
+project/data/processed/
 
 # Model / artifacts
 *.pkl

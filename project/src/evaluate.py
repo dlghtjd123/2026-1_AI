@@ -2,10 +2,21 @@
 evaluate.py
 
 1단계: CIC-IDS2017 내부 test 평가
-2단계: CTU-13 시나리오 9 교차검증 (Adaptive threshold — Safety 2025 방식)
+2단계: CSE-CIC-IDS2018 교차검증
+3단계: CTU-13 시나리오 9 교차검증
+
+주 평가 지표: ROC-AUC (threshold-independent)
+  → 클래스 불균형 + 교차 데이터셋 환경에서 표준 지표
+  → threshold 선택과 무관하게 모델 구별 능력 측정
+  (Transformer-IDS, JCS 2025; IoT Botnet arXiv:2104.02231)
+
+보조 지표: Accuracy / Precision / Recall / F1
+  → target dataset에서 Youden's J로 threshold를 보정한 뒤 계산
+  → 최적 threshold에서의 실제 탐지 성능
+  → Safety 2025 방식 (target dataset 통계 사용, 논문 명시 필요)
 
 사용법:
-  python evaluate.py                    # Baseline
+  python evaluate.py
   python evaluate.py --augment smote
   python evaluate.py --augment gan
   python evaluate.py --augment wgan_gp
@@ -27,10 +38,10 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
-    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
+    roc_curve,
 )
 
 
@@ -43,13 +54,12 @@ _parser.add_argument(
     type=str,
     default="none",
     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
-    help="사용할 증강 방식 (default: none)",
 )
 AUGMENT = _parser.parse_args().augment
 
 
 # =========================================================
-# 경로 설정 — AUGMENT 값에 따라 자동 변경
+# 경로 설정
 # =========================================================
 _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
@@ -61,13 +71,25 @@ MODEL_DIR  = _ROOT / "artifacts" / f"models{_SUFFIX}"
 RESULT_DIR = _ROOT / "artifacts" / f"results{_SUFFIX}"
 DATA_ROOT  = _PROJECT / "data" / "processed"
 
-# CIC-IDS2017 test 데이터는 증강과 무관하게 원본 사용
-CIC_FLAT = DATA_ROOT / "cicids2017" / "flat"
-CIC_SEQ  = DATA_ROOT / "cicids2017" / "seq"
+CIC_FLAT   = DATA_ROOT / "cicids2017" / "flat"
+CIC_SEQ    = DATA_ROOT / "cicids2017" / "seq"
+CIC18_FLAT = DATA_ROOT / "cicids2018" / "flat"
+CIC18_SEQ  = DATA_ROOT / "cicids2018" / "seq"
+CTU_FLAT   = DATA_ROOT / "ctu13" / "flat"
+CTU_SEQ    = DATA_ROOT / "ctu13" / "seq"
 
-# CTU-13은 항상 동일
-CTU_FLAT = DATA_ROOT / "ctu13" / "flat"
-CTU_SEQ  = DATA_ROOT / "ctu13" / "seq"
+MODEL_SUBDIRS = {
+    "rf_flow":       "rf",
+    "xgb_flow":      "xgb",
+    "cnn_lstm_flow": "cnn_lstm",
+    "gru_flow":      "gru",
+    "cnn_gru_flow":  "cnn_gru",
+}
+
+MODEL_DISPLAY = {
+    "rf": "RF", "xgb": "XGBoost",
+    "cnn_lstm": "CNN-LSTM", "gru": "GRU", "cnn_gru": "CNN-GRU",
+}
 
 
 # =========================================================
@@ -120,7 +142,7 @@ class CNNGRUModel(nn.Module):
 # =========================================================
 # 지표 계산
 # =========================================================
-def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> dict:
+def compute_metrics(y_true, y_pred, y_prob) -> dict:
     metrics = {
         "accuracy":  float(accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
@@ -138,25 +160,32 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) 
     return metrics
 
 
-def find_best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
-    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
-    f1_scores = 2 * precisions * recalls / (precisions + recalls + 1e-8)
-    best_idx  = np.argmax(f1_scores[:-1])
-    return float(thresholds[best_idx])
+def find_youdens_j_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Youden's J = TPR - FPR 최대화"""
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    return float(thresholds[np.argmax(tpr - fpr)])
 
 
 # =========================================================
-# 모델 로드 & 예측
+# 모델 로드
 # =========================================================
+def _model_path(name: str, ext: str) -> Path:
+    return MODEL_DIR / MODEL_SUBDIRS.get(name, "") / f"{name}.{ext}"
+
+
+def _threshold_path(name: str) -> Path:
+    return MODEL_DIR / MODEL_SUBDIRS.get(name, "") / f"{name}_threshold.json"
+
+
 def load_sklearn_model(name: str):
-    model     = joblib.load(MODEL_DIR / f"{name}.pkl")
-    threshold = json.loads((MODEL_DIR / f"{name}_threshold.json").read_text())["threshold"]
+    model     = joblib.load(_model_path(name, "pkl"))
+    threshold = json.loads(_threshold_path(name).read_text())["threshold"]
     return model, float(threshold)
 
 
 def load_torch_model(name: str):
-    ckpt_path = MODEL_DIR / f"{name}.pt"
-    threshold = json.loads((MODEL_DIR / f"{name}_threshold.json").read_text())["threshold"]
+    ckpt_path = _model_path(name, "pt")
+    threshold = json.loads(_threshold_path(name).read_text())["threshold"]
     return ckpt_path, float(threshold)
 
 
@@ -164,86 +193,106 @@ def predict_sklearn_probs(model, X: np.ndarray) -> np.ndarray:
     return model.predict_proba(X)[:, 1]
 
 
-def load_sequence_model(ckpt_path: Path, model_type: str, device):
+def load_sequence_model(ckpt_path, model_type, device):
     ckpt = torch.load(ckpt_path, map_location=device)
     if model_type == "cnn_lstm":
         model = CNNLSTMModel(
-            n_features    = ckpt["n_features"],
-            conv_channels = ckpt.get("conv_channels", 64),
-            lstm_hidden   = ckpt.get("lstm_hidden", 64),
-            dropout       = ckpt.get("dropout", 0.3),
+            n_features=ckpt["n_features"],
+            conv_channels=ckpt.get("conv_channels", 64),
+            lstm_hidden=ckpt.get("lstm_hidden", 64),
+            dropout=ckpt.get("dropout", 0.3),
         )
     elif model_type == "gru":
         model = GRUModel(
-            n_features = ckpt["n_features"],
-            gru_hidden = ckpt.get("gru_hidden", 64),
-            dropout    = ckpt.get("dropout", 0.3),
+            n_features=ckpt["n_features"],
+            gru_hidden=ckpt.get("gru_hidden", 64),
+            dropout=ckpt.get("dropout", 0.3),
         )
     elif model_type == "cnn_gru":
         model = CNNGRUModel(
-            n_features    = ckpt["n_features"],
-            conv_channels = ckpt.get("conv_channels", 64),
-            gru_hidden    = ckpt.get("gru_hidden", 64),
-            dropout       = ckpt.get("dropout", 0.3),
+            n_features=ckpt["n_features"],
+            conv_channels=ckpt.get("conv_channels", 64),
+            gru_hidden=ckpt.get("gru_hidden", 64),
+            dropout=ckpt.get("dropout", 0.3),
         )
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
     model.load_state_dict(ckpt["model_state_dict"])
-    model.to(device).eval()
-    return model
+    return model.to(device).eval()
 
 
-def predict_sequence_probs(
-    ckpt_path:  Path,
-    model_type: str,
-    X:          np.ndarray,
-    batch_size: int = 512,
-) -> np.ndarray:
+def predict_sequence_probs(ckpt_path, model_type, X, batch_size=512) -> np.ndarray:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model  = load_sequence_model(ckpt_path, model_type, device)
     probs  = []
     with torch.no_grad():
         for start in range(0, len(X), batch_size):
             X_b = torch.tensor(
-                X[start : start + batch_size], dtype=torch.float32
+                X[start:start+batch_size], dtype=torch.float32
             ).to(device)
             probs.append(torch.sigmoid(model(X_b)).cpu().numpy())
     return np.concatenate(probs)
 
 
-# =========================================================
-# 비교표 출력
-# =========================================================
-def row_from_metrics(model_name: str, m: dict) -> dict:
+def get_all_probs(X_flat, X_seq) -> dict:
+    rf_model,     _ = load_sklearn_model("rf_flow")
+    xgb_model,    _ = load_sklearn_model("xgb_flow")
+    cnn_ckpt,     _ = load_torch_model("cnn_lstm_flow")
+    gru_ckpt,     _ = load_torch_model("gru_flow")
+    cnn_gru_ckpt, _ = load_torch_model("cnn_gru_flow")
     return {
-        "model":     model_name,
-        "threshold": m.get("threshold"),
-        "accuracy":  m["accuracy"],
-        "precision": m["precision"],
-        "recall":    m["recall"],
-        "f1":        m["f1"],
-        "roc_auc":   m["roc_auc"],
+        "rf":       predict_sklearn_probs(rf_model,  X_flat),
+        "xgb":      predict_sklearn_probs(xgb_model, X_flat),
+        "cnn_lstm": predict_sequence_probs(cnn_ckpt,     "cnn_lstm", X_seq),
+        "gru":      predict_sequence_probs(gru_ckpt,     "gru",      X_seq),
+        "cnn_gru":  predict_sequence_probs(cnn_gru_ckpt, "cnn_gru",  X_seq),
     }
 
 
-def print_table(title: str, rows: list[dict]) -> None:
-    print(f"\n{'='*78}")
+# =========================================================
+# 출력 테이블 — ROC-AUC 첫 번째 (주 지표)
+# =========================================================
+def print_roc_table(title: str, rows: list[dict]) -> None:
+    print(f"\n{'='*92}")
     print(f"  {title}")
-    print(f"{'='*78}")
-    print(f"{'Model':<22} {'Threshold':>10} {'Accuracy':>9} "
-          f"{'Precision':>10} {'Recall':>8} {'F1':>8} {'ROC-AUC':>9}")
-    print("-" * 78)
+    print("  ★ 주 지표: ROC-AUC / 보조 지표: Accuracy, Precision, Recall, F1")
+    print(f"{'='*92}")
+
+    print(
+        f"{'Model':<22} {'ROC-AUC':>9} {'Threshold':>10} "
+        f"{'Accuracy':>10} {'Precision':>10} {'Recall':>8} {'F1':>8}"
+    )
+    print("-" * 92)
+
     for r in rows:
-        roc = f"{r['roc_auc']:.4f}" if r.get("roc_auc") is not None else "   None"
-        thr = f"{r['threshold']:.4f}" if r.get("threshold") is not None else "     -"
-        print(f"{r['model']:<22} {thr:>10} {r['accuracy']:>9.4f} "
-              f"{r['precision']:>10.4f} {r['recall']:>8.4f} "
-              f"{r['f1']:>8.4f} {roc:>9}")
-    print("=" * 78)
+        roc = f"{r['roc_auc']:.4f}" if r.get("roc_auc") is not None else "-"
+        thr = f"{r['threshold']:.4f}" if r.get("threshold") is not None else "-"
+        acc = f"{r['accuracy']:.4f}" if r.get("accuracy") is not None else "-"
+        pre = f"{r['precision']:.4f}" if r.get("precision") is not None else "-"
+        rec = f"{r['recall']:.4f}" if r.get("recall") is not None else "-"
+        f1 = f"{r['f1']:.4f}" if r.get("f1") is not None else "-"
+
+        print(
+            f"{r['model']:<22} {roc:>9} {thr:>10} "
+            f"{acc:>10} {pre:>10} {rec:>8} {f1:>8}"
+        )
+
+    print("=" * 92)
+
+def row_from_metrics(name: str, m: dict, thr: float = None) -> dict:
+    return {
+        "model": name,
+        "roc_auc": m.get("roc_auc"),
+        "threshold": thr if thr is not None else m.get("threshold"),
+        "accuracy": m.get("accuracy"),
+        "precision": m.get("precision"),
+        "recall": m.get("recall"),
+        "f1": m.get("f1"),
+    }
 
 
 # =========================================================
-# 1단계: CIC-IDS2017 내부 test 평가
+# 1단계: CIC-IDS2017 내부 test
 # =========================================================
 def stage1_cic_test() -> dict:
     print("\n[1단계] CIC-IDS2017 내부 test 평가")
@@ -252,9 +301,7 @@ def stage1_cic_test() -> dict:
     y_flat = np.load(CIC_FLAT / "y_test.npy").astype(int)
     X_seq  = np.load(CIC_SEQ  / "X_test.npy")
     y_seq  = np.load(CIC_SEQ  / "y_test.npy").astype(int)
-
     print(f"  flat: {X_flat.shape}  Bot 비율: {y_flat.mean():.4f}")
-    print(f"  seq:  {X_seq.shape}   Bot 비율: {y_seq.mean():.4f}")
 
     rf_model,     rf_thr      = load_sklearn_model("rf_flow")
     xgb_model,    xgb_thr     = load_sklearn_model("xgb_flow")
@@ -264,15 +311,13 @@ def stage1_cic_test() -> dict:
 
     def eval_sk(model, thr, X, y):
         prob = predict_sklearn_probs(model, X)
-        pred = (prob >= thr).astype(int)
-        m    = compute_metrics(y, pred, prob)
+        m    = compute_metrics(y, (prob >= thr).astype(int), prob)
         m["threshold"] = thr
         return m
 
     def eval_seq(ckpt, mtype, thr, X, y):
         prob = predict_sequence_probs(ckpt, mtype, X)
-        pred = (prob >= thr).astype(int)
-        m    = compute_metrics(y, pred, prob)
+        m    = compute_metrics(y, (prob >= thr).astype(int), prob)
         m["threshold"] = thr
         return m
 
@@ -284,95 +329,153 @@ def stage1_cic_test() -> dict:
         "cnn_gru":  eval_seq(cnn_gru_ckpt, "cnn_gru",  cnn_gru_thr, X_seq, y_seq),
     }
 
-    print_table(f"1단계: CIC-IDS2017 내부 test [{AUGMENT}]", [
+    print_roc_table(f"1단계: CIC-IDS2017 내부 test [{AUGMENT}]", [
         row_from_metrics("RF",       results["rf"]),
         row_from_metrics("XGBoost",  results["xgb"]),
         row_from_metrics("CNN-LSTM", results["cnn_lstm"]),
         row_from_metrics("GRU",      results["gru"]),
         row_from_metrics("CNN-GRU",  results["cnn_gru"]),
     ])
-
     return results
 
 
 # =========================================================
-# 2단계: CTU-13 시나리오 9 교차검증 (Adaptive threshold)
+# 교차검증 공통 — ROC-AUC + Youden's J F1
 # =========================================================
-def stage2_ctu13_cross() -> dict:
-    print("\n[2단계] CTU-13 시나리오 9 교차검증")
-    print("  방식: Safety 2025 (Scaler 정렬 + Adaptive threshold)")
-    print("  ※ target 정보 사용 — 논문 명시 필요")
+def evaluate_cross(probs: dict, labels: dict) -> dict:
+    results = {}
+    for key, prob in probs.items():
+        y = labels[key]
+
+        # ROC-AUC (주 지표)
+        try:
+            roc_auc = float(roc_auc_score(y, prob))
+        except ValueError:
+            roc_auc = None
+
+        # Youden's J threshold → F1 (보조 지표)
+        thr_j = find_youdens_j_threshold(y, prob)
+        pred_j = (prob >= thr_j).astype(int)
+        m_j    = compute_metrics(y, pred_j, prob)
+        m_j["threshold"] = thr_j
+        m_j["roc_auc"]   = roc_auc
+
+        results[key] = m_j
+    return results
+
+
+# =========================================================
+# 2단계: CSE-CIC-IDS2018 교차검증
+# ---------------------------------------------------------
+# D'Hooge et al. (2020) 동일 설정
+# 봇넷 유형: CIC2017(Neris IRC) → CIC2018(Ares+Zeus HTTP)
+# 주 지표: ROC-AUC / 보조: F1@Youden's J
+# =========================================================
+def stage2_cic2018_cross() -> dict:
+    print("\n[2단계] CSE-CIC-IDS2018 교차검증")
+    print("  D'Hooge et al. (2020) 동일 설정")
+    print("  봇넷: CIC2017(Neris IRC) → CIC2018(Ares+Zeus HTTP)")
+
+    if not (CIC18_FLAT / "X_test.npy").exists():
+        print("  [SKIP] CIC2018 데이터 없음 → preprocess_cicids2018.py 먼저 실행")
+        return {}
+
+    X_flat = np.load(CIC18_FLAT / "X_test.npy")
+    y_flat = np.load(CIC18_FLAT / "y_test.npy").astype(int)
+    X_seq  = np.load(CIC18_SEQ  / "X_test.npy")
+    y_seq  = np.load(CIC18_SEQ  / "y_test.npy").astype(int)
+    print(f"  flat: {X_flat.shape}  Bot 비율: {y_flat.mean():.4f}")
+
+    probs  = get_all_probs(X_flat, X_seq)
+    labels = {
+        "rf": y_flat, "xgb": y_flat,
+        "cnn_lstm": y_seq, "gru": y_seq, "cnn_gru": y_seq,
+    }
+    results = evaluate_cross(probs, labels)
+
+    print_roc_table(
+        f"2단계: CIC-IDS2018 교차검증 (Target-adapted Youden's J) [{AUGMENT}]",
+        [row_from_metrics(MODEL_DISPLAY[k], results[k]) for k in results]
+    )
+    return results
+
+
+# =========================================================
+# 3단계: CTU-13 시나리오 9 교차검증
+# ---------------------------------------------------------
+# Safety 2025 방식
+# 봇넷: CIC2017(Neris IRC 1bot) → CTU-13(Neris IRC 10bots)
+# 주 지표: ROC-AUC / 보조: F1@Youden's J
+# =========================================================
+def stage3_ctu13_cross() -> dict:
+    print("\n[3단계] CTU-13 시나리오 9 교차검증")
+    print("  Safety 2025 방식 (MinMaxScaler + Secondary MinMaxScaler)")
+    print("  봇넷: CIC2017(Neris IRC 1bot) → CTU-13(Neris IRC 10bots)")
 
     X_flat = np.load(CTU_FLAT / "X_test.npy")
     y_flat = np.load(CTU_FLAT / "y_test.npy").astype(int)
     X_seq  = np.load(CTU_SEQ  / "X_test.npy")
     y_seq  = np.load(CTU_SEQ  / "y_test.npy").astype(int)
+    print(f"  flat: {X_flat.shape}  Bot 비율: {y_flat.mean():.4f}")
 
-    print(f"\n  flat: {X_flat.shape}  Bot 비율: {y_flat.mean():.4f}")
-    print(f"  seq:  {X_seq.shape}   Bot 비율: {y_seq.mean():.4f}")
-
-    rf_model,     _ = load_sklearn_model("rf_flow")
-    xgb_model,    _ = load_sklearn_model("xgb_flow")
-    cnn_ckpt,     _ = load_torch_model("cnn_lstm_flow")
-    gru_ckpt,     _ = load_torch_model("gru_flow")
-    cnn_gru_ckpt, _ = load_torch_model("cnn_gru_flow")
-
-    rf_prob      = predict_sklearn_probs(rf_model,  X_flat)
-    xgb_prob     = predict_sklearn_probs(xgb_model, X_flat)
-    cnn_prob     = predict_sequence_probs(cnn_ckpt,     "cnn_lstm", X_seq)
-    gru_prob     = predict_sequence_probs(gru_ckpt,     "gru",      X_seq)
-    cnn_gru_prob = predict_sequence_probs(cnn_gru_ckpt, "cnn_gru",  X_seq)
-
-    def eval_adaptive(y_true, y_prob):
-        thr  = find_best_threshold(y_true, y_prob)
-        pred = (y_prob >= thr).astype(int)
-        m    = compute_metrics(y_true, pred, y_prob)
-        m["threshold"] = thr
-        return m
-
-    results = {
-        "rf":       eval_adaptive(y_flat, rf_prob),
-        "xgb":      eval_adaptive(y_flat, xgb_prob),
-        "cnn_lstm": eval_adaptive(y_seq,  cnn_prob),
-        "gru":      eval_adaptive(y_seq,  gru_prob),
-        "cnn_gru":  eval_adaptive(y_seq,  cnn_gru_prob),
+    probs  = get_all_probs(X_flat, X_seq)
+    labels = {
+        "rf": y_flat, "xgb": y_flat,
+        "cnn_lstm": y_seq, "gru": y_seq, "cnn_gru": y_seq,
     }
+    results = evaluate_cross(probs, labels)
 
-    print_table(f"2단계: CTU-13 교차검증 (Adaptive) [{AUGMENT}]", [
-        row_from_metrics("RF",       results["rf"]),
-        row_from_metrics("XGBoost",  results["xgb"]),
-        row_from_metrics("CNN-LSTM", results["cnn_lstm"]),
-        row_from_metrics("GRU",      results["gru"]),
-        row_from_metrics("CNN-GRU",  results["cnn_gru"]),
-    ])
-
+    print_roc_table(
+        f"3단계: CTU-13 교차검증 (Target-adapted Youden's J) [{AUGMENT}]",
+        [row_from_metrics(MODEL_DISPLAY[k], results[k]) for k in results]
+    )
     return results
 
 
 # =========================================================
-# Recall 비교 출력
+# ROC-AUC 요약 — 핵심 비교표
 # =========================================================
-def print_recall_comparison(stage1: dict, stage2: dict) -> None:
-    print(f"\n[Recall 비교] CIC2017 내부 → CTU-13 교차검증  [{AUGMENT}]")
-    print(f"{'Model':<12} {'CIC2017 test':>13} {'CTU13 Adaptive':>15}")
+def print_roc_auc_summary(stage1: dict, stage2: dict, stage3: dict) -> None:
+    print(f"\n{'='*65}")
+    print(f"  ★ ROC-AUC 요약 (주 지표)  [{AUGMENT}]")
+    print(f"  ROC-AUC: 0.5=랜덤 / 0.7=양호 / 0.9=우수 / 1.0=완벽")
+    print(f"{'='*65}")
+    print(f"{'Model':<12} {'CIC2017':>9} {'CIC2018':>9} {'CTU-13':>9}")
     print("-" * 42)
-    for display, key in [
-        ("RF", "rf"), ("XGBoost", "xgb"),
-        ("CNN-LSTM", "cnn_lstm"), ("GRU", "gru"), ("CNN-GRU", "cnn_gru"),
-    ]:
-        cic = stage1.get(key, {}).get("recall", 0.0)
-        ctu = stage2.get(key, {}).get("recall", 0.0)
-        print(f"{display:<12} {cic:>13.4f} {ctu:>15.4f}")
+
+    for key, display in MODEL_DISPLAY.items():
+        c = stage1.get(key, {}).get("roc_auc")
+        c18 = stage2.get(key, {}).get("roc_auc")
+        ctu = stage3.get(key, {}).get("roc_auc")
+
+        c_str = f"{c:.4f}" if isinstance(c, float) else "-"
+        c18_str = f"{c18:.4f}" if isinstance(c18, float) else "-"
+        ctu_str = f"{ctu:.4f}" if isinstance(ctu, float) else "-"
+
+        print(f"{display:<12} {c_str:>9} {c18_str:>9} {ctu_str:>9}")
+
+    print("=" * 65)
+    print("  CIC2017: 내부 평가")
+    print("  CIC2018, CTU-13: target-adapted cross-dataset evaluation")
 
 
 # =========================================================
 # 결과 저장
 # =========================================================
-def save_results(stage1: dict, stage2: dict) -> None:
+def save_results(stage1: dict, stage2: dict, stage3: dict) -> None:
     out = {
-        "augment":            AUGMENT,
-        "stage1_cic_test":    stage1,
-        "stage2_ctu13_cross": stage2,
+        "augment":             AUGMENT,
+        "primary_metric":      "ROC-AUC (threshold-independent)",
+        "secondary_metric":    "F1 @ Youden's J threshold (Safety 2025)",
+        "scaler":              "MinMaxScaler + Secondary MinMaxScaler",
+        "references": {
+            "roc_auc":   "Transformer-IDS, JCS 2025; arXiv:2104.02231",
+            "threshold": "de Nascimento & Hou, Safety 2025",
+            "scaler":    "D'Hooge et al., JISA 2020",
+        },
+        "stage1_cic_test":      stage1,
+        "stage2_cic2018_cross": stage2,
+        "stage3_ctu13_cross":   stage3,
     }
     out_path = RESULT_DIR / "eval_results.json"
     with open(out_path, "w", encoding="utf-8") as f:
@@ -386,20 +489,23 @@ def save_results(stage1: dict, stage2: dict) -> None:
 def main():
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 78)
-    print(f"  evaluate.py — CIC2017 학습 / CTU-13 교차검증  [augment={AUGMENT}]")
-    print("=" * 78)
-    print(f"  MODEL_DIR  = {MODEL_DIR}")
-    print(f"  RESULT_DIR = {RESULT_DIR}")
-    print("=" * 78)
+    print("=" * 72)
+    print(f"  evaluate.py  [augment={AUGMENT}]")
+    print("=" * 72)
+    print(f"  MODEL_DIR      = {MODEL_DIR}")
+    print(f"  RESULT_DIR     = {RESULT_DIR}")
+    print(f"  ★ 주 지표     = ROC-AUC (threshold-independent)")
+    print(f"  보조 지표     = F1 @ Youden's J (Safety 2025)")
+    print(f"  Scaler        = MinMaxScaler + Secondary MinMaxScaler")
+    print("=" * 72)
 
     stage1 = stage1_cic_test()
-    stage2 = stage2_ctu13_cross()
+    stage2 = stage2_cic2018_cross()
+    stage3 = stage3_ctu13_cross()
 
-    print_recall_comparison(stage1, stage2)
-    save_results(stage1, stage2)
-
-    print(f"\n[완료] {RESULT_DIR}/eval_results.json 저장됨")
+    print_roc_auc_summary(stage1, stage2, stage3)
+    save_results(stage1, stage2, stage3)
+    print(f"\n[완료] {RESULT_DIR}/eval_results.json")
 
 
 if __name__ == "__main__":

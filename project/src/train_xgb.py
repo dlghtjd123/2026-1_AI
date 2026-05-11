@@ -1,5 +1,5 @@
-import json
 import argparse
+import json
 from pathlib import Path
 
 import joblib
@@ -17,25 +17,31 @@ from xgboost import XGBClassifier
 
 
 # =========================================================
-# 경로 설정
+# 증강 방식 설정
 # =========================================================
-_SRC_DIR   = Path(__file__).resolve().parent
-_PROJECT   = _SRC_DIR.parent
-_ROOT      = _PROJECT.parent
-
-MODEL_DIR  = _ROOT / "artifacts" / "models"
-RESULT_DIR = _ROOT / "artifacts" / "results"
-
-DATA_DIR = _PROJECT / "data" / "processed" / "cicids2017" / "flat"
-
-parser = argparse.ArgumentParser()
-parser.add_argument(
+_parser = argparse.ArgumentParser()
+_parser.add_argument(
     "--augment",
     type=str,
     default="none",
     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
 )
-AUGMENT = parser.parse_args().augment
+AUGMENT = _parser.parse_args().augment
+
+
+# =========================================================
+# 경로 설정
+# =========================================================
+_SRC_DIR  = Path(__file__).resolve().parent
+_PROJECT  = _SRC_DIR.parent
+_ROOT     = _PROJECT.parent
+
+_DATA_SUFFIX  = f"cicids2017_{AUGMENT}" if AUGMENT != "none" else "cicids2017"
+_MODEL_SUFFIX = f"_{AUGMENT}"           if AUGMENT != "none" else ""
+
+DATA_DIR   = _PROJECT / "data" / "processed" / _DATA_SUFFIX / "flat"
+MODEL_DIR  = _ROOT / "artifacts" / f"models{_MODEL_SUFFIX}" / "xgb"   # ← xgb 서브폴더
+RESULT_DIR = _ROOT / "artifacts" / f"results{_MODEL_SUFFIX}"
 
 
 def load_data(data_dir: Path):
@@ -75,34 +81,20 @@ def pick_best_threshold(y_true, y_prob):
         y_pred = (y_prob >= threshold).astype(int)
         metrics = compute_metrics(y_true, y_pred, y_prob)
 
-        # Recall을 너무 낮게 만드는 threshold는 제외
         if metrics["recall"] < 0.8:
             continue
 
-        candidate = (
-            metrics["f1"],
-            metrics["precision"],
-            -threshold,
-        )
-
+        candidate = (metrics["f1"], metrics["precision"], -threshold)
         if best is None or candidate > best:
             best = candidate
             best_threshold = float(round(threshold, 4))
             best_metrics = metrics
 
-    # recall >= 0.8을 만족하는 threshold가 없을 경우 fallback
     if best_metrics is None:
         for threshold in thresholds:
             y_pred = (y_prob >= threshold).astype(int)
             metrics = compute_metrics(y_true, y_pred, y_prob)
-
-            candidate = (
-                metrics["recall"],
-                metrics["f1"],
-                metrics["precision"],
-                -threshold,
-            )
-
+            candidate = (metrics["recall"], metrics["f1"], metrics["precision"], -threshold)
             if best is None or candidate > best:
                 best = candidate
                 best_threshold = float(round(threshold, 4))
@@ -129,7 +121,10 @@ def print_metrics(name, metrics):
 
 
 def main():
-    print(f"[CONFIG] data : {DATA_DIR}")
+    print(f"[CONFIG] AUGMENT    : {AUGMENT}")
+    print(f"[CONFIG] DATA_DIR   : {DATA_DIR}")
+    print(f"[CONFIG] MODEL_DIR  : {MODEL_DIR}")
+    print(f"[CONFIG] RESULT_DIR : {RESULT_DIR}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
@@ -166,17 +161,18 @@ def main():
     best_threshold, val_metrics = pick_best_threshold(y_val, val_prob)
     print_metrics("XGBoost Validation", val_metrics)
 
+    # 저장 — MODEL_DIR = artifacts/models{suffix}/xgb/
     joblib.dump(model, MODEL_DIR / "xgb_flow.pkl")
 
-    with open(MODEL_DIR / "xgb_flow_threshold.json", "w", encoding="utf-8") as f:
+    with open(MODEL_DIR  / "xgb_flow_threshold.json",  "w", encoding="utf-8") as f:
         json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
 
     with open(RESULT_DIR / "xgb_flow_val_metrics.json", "w", encoding="utf-8") as f:
         json.dump(val_metrics, f, indent=4, ensure_ascii=False)
 
-    print(f"\n[SAVED] artifacts/models/xgb_flow.pkl")
-    print(f"[SAVED] artifacts/models/xgb_flow_threshold.json")
-    print(f"[SAVED] artifacts/results/xgb_flow_val_metrics.json")
+    print(f"\n[SAVED] {MODEL_DIR}/xgb_flow.pkl")
+    print(f"[SAVED] {MODEL_DIR}/xgb_flow_threshold.json")
+    print(f"[SAVED] {RESULT_DIR}/xgb_flow_val_metrics.json")
 
 
 if __name__ == "__main__":
