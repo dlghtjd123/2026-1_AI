@@ -5,6 +5,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -15,18 +16,30 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from augment_utils import augment_train_fold
+from debug_utils import debug_fold
+
 
 # =========================================================
-# 증강 방식 설정
+# 인자 파싱
 # =========================================================
 _parser = argparse.ArgumentParser()
-_parser.add_argument(
-    "--augment",
-    type=str,
-    default="none",
-    choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
-)
-AUGMENT = _parser.parse_args().augment
+_parser.add_argument("--augment",  type=str, default="none",
+                     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"])
+_parser.add_argument("--dataset",  type=str, default="cicids2017",
+                     choices=["cicids2017", "cicids2018", "ctu13"])
+_parser.add_argument("--n_folds",  type=int, default=5)
+_parser.add_argument("--debug",    action="store_true",
+                     help="디버그 모드: 원인 분석 로그 출력 (--augment 사용 시 권장)")
+_parser.add_argument("--target_bot_ratio", type=float, default=0.05,
+                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.05=95:5, 0=전체 사용)")
+AUGMENT          = _parser.parse_args().augment
+DATASET          = _parser.parse_args().dataset
+N_FOLDS          = _parser.parse_args().n_folds
+DEBUG            = _parser.parse_args().debug
+TARGET_BOT_RATIO = _parser.parse_args().target_bot_ratio
 
 
 # =========================================================
@@ -36,25 +49,20 @@ _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
 _ROOT     = _PROJECT.parent
 
-_DATA_SUFFIX  = f"cicids2017_{AUGMENT}" if AUGMENT != "none" else "cicids2017"
-_MODEL_SUFFIX = f"_{AUGMENT}"           if AUGMENT != "none" else ""
+DATA_DIR   = _PROJECT / "data" / "processed" / DATASET / "flat"
+DATA_ROOT  = _PROJECT / "data" / "processed"
+_MODEL_SUFFIX = f"_{AUGMENT}" if AUGMENT != "none" else ""
+MODEL_DIR  = _ROOT / "artifacts" / f"models_{DATASET}{_MODEL_SUFFIX}" / "rf"
+RESULT_DIR = _ROOT / "artifacts" / f"results_{DATASET}{_MODEL_SUFFIX}"
 
-DATA_DIR   = _PROJECT / "data" / "processed" / _DATA_SUFFIX / "flat"
-MODEL_DIR  = _ROOT / "artifacts" / f"models{_MODEL_SUFFIX}" / "rf"
-RESULT_DIR = _ROOT / "artifacts" / f"results{_MODEL_SUFFIX}"
 
-
+# =========================================================
+# 유틸
+# =========================================================
 def load_data(data_dir: Path):
-    X_train = np.load(data_dir / "X_train.npy")
-    y_train = np.load(data_dir / "y_train.npy").astype(int)
-    X_val   = np.load(data_dir / "X_val.npy")
-    y_val   = np.load(data_dir / "y_val.npy").astype(int)
-    return X_train, y_train, X_val, y_val
-
-def load_cross_data(data_dir: Path):
-    X_test = np.load(data_dir / "X_test.npy")
-    y_test = np.load(data_dir / "y_test.npy").astype(int)
-    return X_test, y_test
+    X = np.load(data_dir / "X_trainval.npy")
+    y = np.load(data_dir / "y_trainval.npy").astype(int)
+    return X, y
 
 
 def compute_metrics(y_true, y_pred, y_prob):
@@ -75,109 +83,159 @@ def compute_metrics(y_true, y_pred, y_prob):
     return metrics
 
 
-def pick_best_threshold(y_true, y_prob):
-    best = None
-    best_threshold = 0.5
-    best_metrics = None
+def print_fold_summary(fold_results: list[dict]) -> dict:
+    keys = ["f1", "recall", "precision", "roc_auc", "accuracy"]
+    summary = {}
 
-    thresholds = np.arange(0.05, 0.96, 0.01)
+    print(f"\n{'='*60}")
+    print(f"  RF  {N_FOLDS}-Fold CV 결과 요약  [{DATASET} / {AUGMENT}]")
+    print(f"  ★ 주 지표: F1, Recall  /  보조: ROC-AUC")
+    print(f"{'='*60}")
+    print(f"{'지표':<14} {'평균':>8} {'표준편차':>10} {'최소':>8} {'최대':>8}")
+    print("-" * 52)
 
-    for threshold in thresholds:
-        y_pred = (y_prob >= threshold).astype(int)
-        metrics = compute_metrics(y_true, y_pred, y_prob)
-
-        # Recall을 너무 낮게 만드는 threshold는 제외
-        if metrics["recall"] < 0.8:
+    for key in keys:
+        vals = [r[key] for r in fold_results if r.get(key) is not None]
+        if not vals:
             continue
+        mean, std = float(np.mean(vals)), float(np.std(vals))
+        summary[key] = {"mean": mean, "std": std,
+                        "min": float(np.min(vals)), "max": float(np.max(vals))}
+        marker = " ★" if key in ("f1", "recall") else ""
+        print(f"{key:<14} {mean:>8.4f} {std:>10.4f} "
+              f"{np.min(vals):>8.4f} {np.max(vals):>8.4f}{marker}")
 
-        candidate = (
-            metrics["f1"],
-            metrics["precision"],
-            -threshold,
-        )
-
-        if best is None or candidate > best:
-            best = candidate
-            best_threshold = float(round(threshold, 4))
-            best_metrics = metrics
-
-    # recall >= 0.8을 만족하는 threshold가 없을 경우 fallback
-    if best_metrics is None:
-        for threshold in thresholds:
-            y_pred = (y_prob >= threshold).astype(int)
-            metrics = compute_metrics(y_true, y_pred, y_prob)
-
-            candidate = (
-                metrics["recall"],
-                metrics["f1"],
-                metrics["precision"],
-                -threshold,
-            )
-
-            if best is None or candidate > best:
-                best = candidate
-                best_threshold = float(round(threshold, 4))
-                best_metrics = metrics
-
-    best_metrics["selected_threshold"] = best_threshold
-    return best_threshold, best_metrics
+    print("=" * 60)
+    return summary
 
 
-def print_metrics(name, metrics):
-    print(f"\n===== {name} =====")
-    print(f"Threshold : {metrics.get('selected_threshold', 0.5):.2f}")
-    print(f"Accuracy  : {metrics['accuracy']:.4f}")
-    print(f"Precision : {metrics['precision']:.4f}")
-    print(f"Recall    : {metrics['recall']:.4f}")
-    print(f"F1-score  : {metrics['f1']:.4f}")
-    print(
-        f"ROC-AUC   : {metrics['roc_auc']:.4f}"
-        if metrics["roc_auc"] is not None
-        else "ROC-AUC   : None"
-    )
-    print("Confusion Matrix:")
-    print(np.array(metrics["confusion_matrix"]))
-
-
+# =========================================================
+# main
+# =========================================================
 def main():
-    print(f"[CONFIG] data : {DATA_DIR}")
+    print(f"[CONFIG] dataset          : {DATASET}")
+    print(f"[CONFIG] augment          : {AUGMENT}")
+    print(f"[CONFIG] n_folds          : {N_FOLDS}")
+    print(f"[CONFIG] debug            : {DEBUG}")
+    print(f"[CONFIG] target_bot_ratio : {TARGET_BOT_RATIO} "
+          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'})")
+    print(f"[CONFIG] data             : {DATA_DIR}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-    X_train, y_train, X_val, y_val = load_data(DATA_DIR)
-    print("[INFO] X_train shape:", X_train.shape)
-    print("[INFO] X_val shape  :", X_val.shape)
-    print(f"[INFO] Botnet ratio (train): {y_train.mean():.4f}")
+    X_all, y_all = load_data(DATA_DIR)
+    print(f"[INFO] X_trainval shape : {X_all.shape}")
+    print(f"[INFO] Botnet ratio     : {y_all.mean():.4f}")
 
-    model = RandomForestClassifier(
-        n_estimators=500,
-        max_depth=20,
-        min_samples_split=2,
-        min_samples_leaf=2,
-        max_features="sqrt",
-        class_weight="balanced_subsample",
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train, y_train)
+    # ── Benign 서브샘플링 (봇넷 전부 유지, test는 절대 건드리지 않음) ──
+    if TARGET_BOT_RATIO > 0:
+        from augment_utils import subsample_benign
+        X_all, y_all = subsample_benign(X_all, y_all, TARGET_BOT_RATIO)
+    print(f"[INFO] 학습 shape: {X_all.shape}  Bot={y_all.sum():,}")
 
-    val_prob = model.predict_proba(X_val)[:, 1]
-    best_threshold, val_metrics = pick_best_threshold(y_val, val_prob)
+    kf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
 
-    print_metrics("RF Validation", val_metrics)
+    fold_results    = []
+    best_fold_score = None
+    best_fold_model = None
+    best_fold_thr   = 0.5
+    best_fold_idx   = -1
 
-    joblib.dump(model, MODEL_DIR / "rf_flow.pkl")
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X_all, y_all), 1):
+        print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
+
+        X_train, X_val = X_all[train_idx], X_all[val_idx]
+        y_train, y_val = y_all[train_idx], y_all[val_idx]
+
+        # 증강 전 라벨 저장 (debug용)
+        y_train_orig = y_train.copy()
+
+        # train fold에만 증강 적용 — val fold는 항상 원본 유지
+        X_train, y_train = augment_train_fold(
+            X_train, y_train, AUGMENT, DATASET, DATA_ROOT
+        )
+        if AUGMENT != "none":
+            print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
+
+        # ── RF class_weight: 증강 여부와 관계없이 항상 balanced_subsample ──
+        # DEBUG 시 이중 보정 여부 확인 가능
+        class_weight = "balanced_subsample"
+
+        model = RandomForestClassifier(
+            n_estimators=500,
+            max_depth=20,
+            min_samples_split=2,
+            min_samples_leaf=2,
+            max_features="sqrt",
+            class_weight=class_weight,
+            random_state=42,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train)
+
+        val_prob    = model.predict_proba(X_val)[:, 1]
+        y_pred      = (val_prob >= 0.5).astype(int)
+        val_metrics = compute_metrics(y_val, y_pred, val_prob)
+        val_metrics["selected_threshold"] = 0.5
+        val_metrics["fold"]               = fold
+        val_metrics["threshold"]          = 0.5
+        fold_results.append(val_metrics)
+
+        print(
+            f"  thr=0.50 | "
+            f"F1={val_metrics['f1']:.4f} | "
+            f"Recall={val_metrics['recall']:.4f} | "
+            f"Precision={val_metrics['precision']:.4f} | "
+            f"ROC-AUC={val_metrics.get('roc_auc', 0):.4f}"
+        )
+
+        # ── 디버그 출력 (--debug 플래그 또는 증강 시 자동) ──
+        if DEBUG or AUGMENT != "none":
+            debug_fold(
+                fold=fold,
+                y_val=y_val,
+                y_pred=y_pred,
+                y_prob=val_prob,
+                y_train_orig=y_train_orig,
+                y_train_aug=y_train if AUGMENT != "none" else None,
+                class_weight=class_weight,
+                augment=AUGMENT,
+            )
+
+        # 최고 F1 fold 모델 저장
+        score = (val_metrics["f1"], val_metrics["recall"])
+        if best_fold_score is None or score > best_fold_score:
+            best_fold_score = score
+            best_fold_model = model
+            best_fold_thr   = 0.5
+            best_fold_idx   = fold
+
+    # ── K-fold 요약 ──────────────────────────────────────
+    summary = print_fold_summary(fold_results)
+    print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
+
+    # ── 저장 ─────────────────────────────────────────────
+    joblib.dump(best_fold_model, MODEL_DIR / "rf_flow.pkl")
 
     with open(MODEL_DIR / "rf_flow_threshold.json", "w", encoding="utf-8") as f:
-        json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
+        json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
 
-    with open(RESULT_DIR / "rf_flow_val_metrics.json", "w", encoding="utf-8") as f:
-        json.dump(val_metrics, f, indent=4, ensure_ascii=False)
+    output = {
+        "dataset":        DATASET,
+        "augment":        AUGMENT,
+        "n_folds":        N_FOLDS,
+        "primary_metric": ["f1", "recall"],
+        "summary":        summary,
+        "fold_results":   fold_results,
+        "best_fold":      best_fold_idx,
+    }
+    with open(RESULT_DIR / "rf_flow_kfold_results.json", "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=4, ensure_ascii=False)
 
     print(f"\n[SAVED] {MODEL_DIR}/rf_flow.pkl")
     print(f"[SAVED] {MODEL_DIR}/rf_flow_threshold.json")
-    print(f"[SAVED] {RESULT_DIR}/rf_flow_val_metrics.json")
+    print(f"[SAVED] {RESULT_DIR}/rf_flow_kfold_results.json")
 
 
 if __name__ == "__main__":

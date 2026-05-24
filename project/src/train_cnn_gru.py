@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -18,33 +20,42 @@ from sklearn.metrics import (
 )
 from torch.utils.data import DataLoader, Dataset
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from augment_utils import augment_train_fold
+
 
 # =========================================================
-# 증강 방식 설정 — 경로보다 반드시 먼저 파싱
+# 인자 파싱
 # =========================================================
 _parser = argparse.ArgumentParser()
-_parser.add_argument(
-    "--augment",
-    type=str,
-    default="none",
-    choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
-)
-AUGMENT = _parser.parse_args().augment
+_parser.add_argument("--augment", type=str, default="none",
+                     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"])
+_parser.add_argument("--dataset", type=str, default="cicids2017",
+                     choices=["cicids2017", "cicids2018", "ctu13"], help="학습 데이터셋 선택")
+_parser.add_argument("--n_folds", type=int, default=5, help="K-fold 수 (기본값: 5)")
+_parser.add_argument("--target_bot_ratio", type=float, default=0.05,
+                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.05=95:5, 0=전체 사용)")
+AUGMENT          = _parser.parse_args().augment
+DATASET          = _parser.parse_args().dataset
+N_FOLDS          = _parser.parse_args().n_folds
+TARGET_BOT_RATIO = _parser.parse_args().target_bot_ratio
 
 
 # =========================================================
-# 경로 설정 — AUGMENT 값에 따라 자동 변경
+# 경로 설정
 # =========================================================
 _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
 _ROOT     = _PROJECT.parent
 
-_DATA_SUFFIX  = f"cicids2017_{AUGMENT}" if AUGMENT != "none" else "cicids2017"
-_MODEL_SUFFIX = f"_{AUGMENT}"           if AUGMENT != "none" else ""
+_DATA_SUFFIX  = DATASET
+_MODEL_SUFFIX = f"_{AUGMENT}"          if AUGMENT != "none" else ""
 
 DATA_DIR   = _PROJECT / "data" / "processed" / _DATA_SUFFIX / "seq"
-MODEL_DIR  = _ROOT / "artifacts" / f"models{_MODEL_SUFFIX}" / "cnn_gru"
-RESULT_DIR = _ROOT / "artifacts" / f"results{_MODEL_SUFFIX}"
+DATA_ROOT  = _PROJECT / "data" / "processed"
+MODEL_DIR  = _ROOT / "artifacts" / f"models_{DATASET}{_MODEL_SUFFIX}" / "cnn_gru"
+RESULT_DIR = _ROOT / "artifacts" / f"results_{DATASET}{_MODEL_SUFFIX}"
 
 
 # =========================================================
@@ -60,7 +71,7 @@ def set_seed(seed: int = 42):
 class SequenceDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32)   # argmax 방식: long 타입 필요
 
     def __len__(self):
         return len(self.X)
@@ -69,52 +80,53 @@ class SequenceDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-# =========================================================
-# 모델
-# =========================================================
+class FocalLoss(nn.Module):
+    """
+    Focal Loss (Lin et al., 2017 - RetinaNet)
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    alpha : 양성(봇넷) 클래스 가중치 (0.75 → 소수 클래스 집중)
+    gamma : focusing parameter (2.0 표준값)
+    """
+    def __init__(self, alpha: float = 0.75, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets = targets.float()   # 추가
+
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, targets, reduction="none"
+        )
+        p_t = torch.exp(-bce_loss)
+        alpha_t = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
+        loss = alpha_t * (1.0 - p_t) ** self.gamma * bce_loss
+        return loss.mean()
+
+
 class CNNGRUModel(nn.Module):
     def __init__(self, n_features, conv_channels=64, gru_hidden=64, dropout=0.3):
         super().__init__()
-        self.conv1 = nn.Conv1d(
-            in_channels=n_features,
-            out_channels=conv_channels,
-            kernel_size=3,
-            padding=1,
-        )
+        self.conv1   = nn.Conv1d(n_features, conv_channels, kernel_size=3, padding=1)
         self.relu    = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
-        self.gru     = nn.GRU(
-            input_size=conv_channels,
-            hidden_size=gru_hidden,
-            num_layers=1,
-            batch_first=True,
-        )
-        self.fc = nn.Linear(gru_hidden, 1)
+        self.gru     = nn.GRU(conv_channels, gru_hidden, num_layers=1, batch_first=True)
+        self.fc      = nn.Linear(gru_hidden, 1)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)
-        x = self.relu(self.conv1(x))
-        x = self.dropout(x)
-        x = x.permute(0, 2, 1)
+        x = self.relu(self.conv1(x.permute(0, 2, 1)))
+        x = self.dropout(x).permute(0, 2, 1)
         _, h_n = self.gru(x)
-        x = self.dropout(h_n[-1])
-        return self.fc(x).squeeze(1)
+        return self.fc(self.dropout(h_n[-1])).squeeze(1)
 
 
-# =========================================================
-# 데이터 로드
-# =========================================================
 def load_data(data_dir: Path):
-    X_train = np.load(data_dir / "X_train.npy")
-    y_train = np.load(data_dir / "y_train.npy").astype(int)
-    X_val   = np.load(data_dir / "X_val.npy")
-    y_val   = np.load(data_dir / "y_val.npy").astype(int)
-    return X_train, y_train, X_val, y_val
+    X = np.load(data_dir / "X_trainval.npy")
+    y = np.load(data_dir / "y_trainval.npy").astype(int)
+    return X, y
 
 
-# =========================================================
-# 지표 계산
-# =========================================================
 def compute_metrics(y_true, y_pred, y_prob):
     metrics = {
         "accuracy":  float(accuracy_score(y_true, y_pred)),
@@ -133,35 +145,7 @@ def compute_metrics(y_true, y_pred, y_prob):
     return metrics
 
 
-def pick_best_threshold(y_true, y_prob):
-    best = None
-    best_threshold = 0.5
-    best_metrics   = None
-    thresholds     = np.arange(0.05, 0.96, 0.01)
 
-    for threshold in thresholds:
-        y_pred  = (y_prob >= threshold).astype(int)
-        metrics = compute_metrics(y_true, y_pred, y_prob)
-        if metrics["recall"] < 0.8:
-            continue
-        candidate = (metrics["f1"], metrics["precision"], -threshold)
-        if best is None or candidate > best:
-            best           = candidate
-            best_threshold = float(round(threshold, 4))
-            best_metrics   = metrics
-
-    if best_metrics is None:
-        for threshold in thresholds:
-            y_pred    = (y_prob >= threshold).astype(int)
-            metrics   = compute_metrics(y_true, y_pred, y_prob)
-            candidate = (metrics["recall"], metrics["f1"], metrics["precision"], -threshold)
-            if best is None or candidate > best:
-                best           = candidate
-                best_threshold = float(round(threshold, 4))
-                best_metrics   = metrics
-
-    best_metrics["selected_threshold"] = best_threshold
-    return best_threshold, best_metrics
 
 
 def collect_probs_and_loss(model, loader, device, criterion):
@@ -183,73 +167,23 @@ def collect_probs_and_loss(model, loader, device, criterion):
     )
 
 
-def print_metrics(name, metrics, loss=None):
-    print(f"\n===== {name} =====")
-    if loss is not None:
-        print(f"Loss      : {loss:.4f}")
-    print(f"Threshold : {metrics.get('selected_threshold', 0.5):.2f}")
-    print(f"Accuracy  : {metrics['accuracy']:.4f}")
-    print(f"Precision : {metrics['precision']:.4f}")
-    print(f"Recall    : {metrics['recall']:.4f}")
-    print(f"F1-score  : {metrics['f1']:.4f}")
-    print(
-        f"ROC-AUC   : {metrics['roc_auc']:.4f}"
-        if metrics["roc_auc"] is not None
-        else "ROC-AUC   : None"
-    )
-    print("Confusion Matrix:")
-    print(np.array(metrics["confusion_matrix"]))
-
-
-# =========================================================
-# 메인
-# =========================================================
-def main():
-    set_seed(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print(f"[CONFIG] AUGMENT    : {AUGMENT}")
-    print(f"[CONFIG] DATA_DIR   : {DATA_DIR}")
-    print(f"[CONFIG] MODEL_DIR  : {MODEL_DIR}")
-    print(f"[CONFIG] RESULT_DIR : {RESULT_DIR}")
-    print(f"[INFO]   device     : {device}")
-
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    RESULT_DIR.mkdir(parents=True, exist_ok=True)
-
-    X_train, y_train, X_val, y_val = load_data(DATA_DIR)
-    print("[INFO] X_train shape:", X_train.shape)
-    print("[INFO] X_val shape  :", X_val.shape)
-    print(f"[INFO] Botnet ratio (train): {y_train.mean():.4f}")
-
+def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
     n_features   = X_train.shape[2]
-    train_loader = DataLoader(
-        SequenceDataset(X_train, y_train), batch_size=128, shuffle=True,  num_workers=0
-    )
-    val_loader = DataLoader(
-        SequenceDataset(X_val, y_val),     batch_size=256, shuffle=False, num_workers=0
-    )
+    train_loader = DataLoader(SequenceDataset(X_train, y_train), batch_size=128, shuffle=True,  num_workers=0)
+    val_loader   = DataLoader(SequenceDataset(X_val,   y_val),   batch_size=256, shuffle=False, num_workers=0)
 
-    model = CNNGRUModel(
-        n_features=n_features, conv_channels=64, gru_hidden=64, dropout=0.3
-    ).to(device)
+    model = CNNGRUModel(n_features=n_features, conv_channels=64, gru_hidden=64, dropout=0.3).to(device)
 
-    pos_count        = np.sum(y_train == 1)
-    neg_count        = np.sum(y_train == 0)
-    pos_weight_value = np.sqrt(float(neg_count / pos_count))
-    pos_weight       = torch.tensor([pos_weight_value], dtype=torch.float32).to(device)
-    print(f"[INFO] pos_weight: {pos_weight_value:.4f}")
-
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion        = FocalLoss(alpha=0.75, gamma=2.0)
+    optimizer        = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     num_epochs       = 30
-    patience         = 5
+    patience         = 6
+    min_epochs       = 20
     best_score       = None
     best_state       = None
-    best_threshold   = 0.5
+    best_threshold   = "argmax"
     best_epoch       = 0
-    best_val_loss    = None
     best_val_metrics = None
     patience_counter = 0
 
@@ -266,10 +200,11 @@ def main():
             running_loss += loss.item() * X_batch.size(0)
 
         train_loss = running_loss / len(train_loader.dataset)
-        val_loss, y_val_true, y_val_prob = collect_probs_and_loss(
-            model, val_loader, device, criterion
-        )
-        current_threshold, current_val_metrics = pick_best_threshold(y_val_true, y_val_prob)
+        val_loss, y_val_true, y_val_prob = collect_probs_and_loss(model, val_loader, device, criterion)
+        y_pred              = (y_val_prob >= 0.5).astype(int)
+        current_val_metrics = compute_metrics(y_val_true, y_pred, y_val_prob)
+        current_val_metrics["selected_threshold"] = 0.5
+        current_threshold   = 0.5
 
         current_score = (
             current_val_metrics["f1"],
@@ -280,9 +215,9 @@ def main():
         )
 
         print(
-            f"[Epoch {epoch:02d}] "
+            f"  [Fold {fold} Epoch {epoch:02d}] "
             f"train={train_loss:.4f} | val={val_loss:.4f} | "
-            f"thr={current_threshold:.2f} | f1={current_val_metrics['f1']:.4f} | "
+            f"thr=0.50 | f1={current_val_metrics['f1']:.4f} | "
             f"recall={current_val_metrics['recall']:.4f}"
         )
 
@@ -291,29 +226,127 @@ def main():
             best_state       = copy.deepcopy(model.state_dict())
             best_threshold   = current_threshold
             best_epoch       = epoch
-            best_val_loss    = val_loss
             best_val_metrics = current_val_metrics
             patience_counter = 0
         else:
             patience_counter += 1
 
-        if patience_counter >= patience:
-            print(f"[INFO] Early stopping at epoch {epoch}")
+        if epoch >= min_epochs and patience_counter >= patience:
+            print(f"  [Fold {fold}] Early stopping at epoch {epoch}")
             break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
+    model.load_state_dict(best_state)
     best_val_metrics["selected_threshold"] = best_threshold
-    print(f"\n[INFO] Best epoch: {best_epoch}")
-    print_metrics("CNN-GRU Validation", best_val_metrics, loss=best_val_loss)
+    print(f"  [Fold {fold}] Best epoch: {best_epoch}")
+    return model, best_threshold, best_val_metrics, n_features
 
-    # 저장 — MODEL_DIR = artifacts/models{suffix}/cnn_gru/
+
+def print_fold_summary(fold_results: list[dict]) -> dict:
+    keys = ["f1", "recall", "precision", "roc_auc", "accuracy"]
+    summary = {}
+    print(f"\n{'='*60}")
+    print(f"  CNN-GRU  {N_FOLDS}-Fold CV 결과 요약  [{DATASET} / {AUGMENT}]")
+    print(f"  ★ 주 지표: F1, Recall  /  보조: ROC-AUC")
+    print(f"{'='*60}")
+    print(f"{'지표':<14} {'평균':>8} {'표준편차':>10} {'최소':>8} {'최대':>8}")
+    print("-" * 52)
+    for key in keys:
+        vals = [r[key] for r in fold_results if r.get(key) is not None]
+        if not vals:
+            continue
+        mean, std = float(np.mean(vals)), float(np.std(vals))
+        summary[key] = {"mean": mean, "std": std, "min": float(np.min(vals)), "max": float(np.max(vals))}
+        marker = " ★" if key in ("f1", "recall") else ""
+        print(f"{key:<14} {mean:>8.4f} {std:>10.4f} {np.min(vals):>8.4f} {np.max(vals):>8.4f}{marker}")
+    print("=" * 60)
+    return summary
+
+
+# =========================================================
+# main
+# =========================================================
+def main():
+    set_seed(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"[CONFIG] dataset          : {DATASET}")
+    print(f"[CONFIG] augment          : {AUGMENT}")
+    print(f"[CONFIG] n_folds          : {N_FOLDS}")
+    print(f"[CONFIG] target_bot_ratio : {TARGET_BOT_RATIO} "
+          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'}")
+    print(f"[CONFIG] data             : {DATA_DIR}")
+    print(f"[INFO]   device           : {device}")
+
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+
+    X_all, y_all = load_data(DATA_DIR)
+    print(f"[INFO] X_trainval shape : {X_all.shape}")
+    print(f"[INFO] Botnet ratio     : {y_all.mean():.4f}")
+
+    # Benign 서브샘플링 (봇넷 전부 유지, test는 절대 건드리지 않음)
+    if TARGET_BOT_RATIO > 0:
+        from augment_utils import subsample_benign
+        X_all, y_all = subsample_benign(
+            X_all.reshape(len(X_all), -1), y_all, TARGET_BOT_RATIO
+        )
+        n_feat = X_all.shape[1]
+        X_all  = X_all.reshape(-1, n_feat, 1)
+    print(f"[INFO] 학습 shape: {X_all.shape}  Bot={y_all.sum():,}")
+
+    kf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+
+    fold_results    = []
+    best_fold_score = None
+    best_fold_model = None
+    best_fold_thr   = 0.5
+    best_fold_idx   = -1
+    best_n_features = X_all.shape[2]
+
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X_all, y_all), 1):
+        print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
+        X_train, X_val = X_all[train_idx], X_all[val_idx]
+        y_train, y_val = y_all[train_idx], y_all[val_idx]
+
+        # train fold에만 증강 적용 — val fold는 항상 원본 유지
+        X_train, y_train = augment_train_fold(
+            X_train, y_train, AUGMENT, DATASET, DATA_ROOT
+        )
+        if AUGMENT != "none":
+            print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
+
+        # ← 이 줄이 빠져있었음
+        model, thr, metrics, n_feat = train_one_fold(
+            X_train, y_train, X_val, y_val, device, fold
+        )
+
+        metrics["fold"] = fold
+        fold_results.append(metrics)
+
+        print(
+            f"  → F1={metrics['f1']:.4f} | "
+            f"Recall={metrics['recall']:.4f} | "
+            f"Precision={metrics['precision']:.4f} | "
+            f"ROC-AUC={metrics.get('roc_auc', 0):.4f}"
+        )
+
+        score = (metrics["f1"], metrics["recall"])
+        if best_fold_score is None or score > best_fold_score:
+            best_fold_score = score
+            best_fold_model = model
+            best_fold_thr   = 0.5
+            best_fold_idx   = fold
+            best_n_features = n_feat
+
+    summary = print_fold_summary(fold_results)
+    print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
+
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
-            "n_features":    n_features,
-            "window_size":   X_train.shape[1],
+            "model_state_dict": best_fold_model.state_dict(),
+            "n_classes":     2,
+            "n_features":    best_n_features,
+            "window_size":   X_all.shape[1],
             "conv_channels": 64,
             "gru_hidden":    64,
             "dropout":       0.3,
@@ -321,15 +354,24 @@ def main():
         MODEL_DIR / "cnn_gru_flow.pt",
     )
 
-    with open(MODEL_DIR  / "cnn_gru_flow_threshold.json",  "w", encoding="utf-8") as f:
-        json.dump({"threshold": best_threshold}, f, indent=4, ensure_ascii=False)
+    with open(MODEL_DIR / "cnn_gru_flow_threshold.json", "w", encoding="utf-8") as f:
+        json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
 
-    with open(RESULT_DIR / "cnn_gru_flow_val_metrics.json", "w", encoding="utf-8") as f:
-        json.dump(best_val_metrics, f, indent=4, ensure_ascii=False)
+    output = {
+        "dataset":        DATASET,
+        "augment":        AUGMENT,
+        "n_folds":        N_FOLDS,
+        "primary_metric": ["f1", "recall"],
+        "summary":        summary,
+        "fold_results":   fold_results,
+        "best_fold":      best_fold_idx,
+    }
+    with open(RESULT_DIR / "cnn_gru_flow_kfold_results.json", "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=4, ensure_ascii=False)
 
     print(f"\n[SAVED] {MODEL_DIR}/cnn_gru_flow.pt")
     print(f"[SAVED] {MODEL_DIR}/cnn_gru_flow_threshold.json")
-    print(f"[SAVED] {RESULT_DIR}/cnn_gru_flow_val_metrics.json")
+    print(f"[SAVED] {RESULT_DIR}/cnn_gru_flow_kfold_results.json")
 
 
 if __name__ == "__main__":
