@@ -275,15 +275,8 @@ def main():
     print(f"[INFO] X_trainval shape : {X_all.shape}")
     print(f"[INFO] Botnet ratio     : {y_all.mean():.4f}")
 
-    # Benign 서브샘플링 (봇넷 전부 유지, test는 절대 건드리지 않음)
-    if TARGET_BOT_RATIO > 0:
-        from augment_utils import subsample_benign
-        X_all, y_all = subsample_benign(
-            X_all.reshape(len(X_all), -1), y_all, TARGET_BOT_RATIO
-        )
-        n_feat = X_all.shape[1]
-        X_all  = X_all.reshape(-1, n_feat, 1)
-    print(f"[INFO] 학습 shape: {X_all.shape}  Bot={y_all.sum():,}")
+    print(f"[INFO] K-fold 전 shape: {X_all.shape}  Bot={y_all.sum():,}  "
+          f"(subsample은 각 fold train에만 적용)")
 
     kf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
 
@@ -298,6 +291,24 @@ def main():
         print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
         X_train, X_val = X_all[train_idx], X_all[val_idx]
         y_train, y_val = y_all[train_idx], y_all[val_idx]
+
+        # train fold에만 subsample 적용 — val은 원본 분포 유지
+        if TARGET_BOT_RATIO > 0:
+            from augment_utils import subsample_benign
+            n_f = X_train.shape[1]
+            X_train_flat, y_train = subsample_benign(
+                X_train.reshape(len(X_train), -1), y_train, TARGET_BOT_RATIO
+            )
+            X_train = X_train_flat.reshape(-1, n_f, 1)
+
+        # train fold에만 subsample 적용 — val은 원본 분포 유지
+        if TARGET_BOT_RATIO > 0:
+            from augment_utils import subsample_benign
+            _nf = X_train.shape[1]
+            X_train_f, y_train = subsample_benign(
+                X_train.reshape(len(X_train), -1), y_train, TARGET_BOT_RATIO
+            )
+            X_train = X_train_f.reshape(-1, _nf, 1)
 
         # train fold에만 증강 적용 — val fold는 항상 원본 유지
         X_train, y_train = augment_train_fold(
@@ -321,7 +332,7 @@ def main():
         if best_fold_score is None or score > best_fold_score:
             best_fold_score = score
             best_fold_model = model
-            best_fold_thr   = 0.5
+            best_fold_thr   = thr
             best_fold_idx   = fold
             best_n_features = n_feat
 

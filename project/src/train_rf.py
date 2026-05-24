@@ -128,11 +128,8 @@ def main():
     print(f"[INFO] X_trainval shape : {X_all.shape}")
     print(f"[INFO] Botnet ratio     : {y_all.mean():.4f}")
 
-    # ── Benign 서브샘플링 (봇넷 전부 유지, test는 절대 건드리지 않음) ──
-    if TARGET_BOT_RATIO > 0:
-        from augment_utils import subsample_benign
-        X_all, y_all = subsample_benign(X_all, y_all, TARGET_BOT_RATIO)
-    print(f"[INFO] 학습 shape: {X_all.shape}  Bot={y_all.sum():,}")
+    print(f"[INFO] K-fold 전 shape: {X_all.shape}  Bot={y_all.sum():,}  "
+          f"(subsample은 각 fold train에만 적용)")
 
     kf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
 
@@ -150,6 +147,12 @@ def main():
 
         # 증강 전 라벨 저장 (debug용)
         y_train_orig = y_train.copy()
+
+        # train fold에만 subsample 적용 — val은 원본 분포 유지
+        if TARGET_BOT_RATIO > 0:
+            from augment_utils import subsample_benign
+            X_train, y_train = subsample_benign(X_train, y_train, TARGET_BOT_RATIO)
+            y_train_orig = y_train.copy()  # subsample 후 orig 갱신
 
         # train fold에만 증강 적용 — val fold는 항상 원본 유지
         X_train, y_train = augment_train_fold(

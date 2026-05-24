@@ -10,13 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
+    accuracy_score, classification_report, confusion_matrix,
+    f1_score, precision_score, recall_score, roc_auc_score,
 )
 from torch.utils.data import DataLoader, Dataset
 
@@ -25,15 +20,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from augment_utils import augment_train_fold
 
 
-# =========================================================
-# 인자 파싱
-# =========================================================
 _parser = argparse.ArgumentParser()
 _parser.add_argument("--augment", type=str, default="none",
                      choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"])
 _parser.add_argument("--dataset", type=str, default="cicids2017",
-                     choices=["cicids2017", "cicids2018", "ctu13"], help="학습 데이터셋 선택")
-_parser.add_argument("--n_folds", type=int, default=5, help="K-fold 수 (기본값: 5)")
+                     choices=["cicids2017", "cicids2018", "ctu13"])
+_parser.add_argument("--n_folds", type=int, default=5)
 _parser.add_argument("--target_bot_ratio", type=float, default=0.05,
                      help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.05=95:5, 0=전체 사용)")
 AUGMENT          = _parser.parse_args().augment
@@ -41,68 +33,44 @@ DATASET          = _parser.parse_args().dataset
 N_FOLDS          = _parser.parse_args().n_folds
 TARGET_BOT_RATIO = _parser.parse_args().target_bot_ratio
 
-
-# =========================================================
-# 경로 설정
-# =========================================================
 _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
 _ROOT     = _PROJECT.parent
 
-_DATA_SUFFIX  = DATASET
-_MODEL_SUFFIX = f"_{AUGMENT}"          if AUGMENT != "none" else ""
-
-DATA_DIR   = _PROJECT / "data" / "processed" / _DATA_SUFFIX / "seq"
+DATA_DIR   = _PROJECT / "data" / "processed" / DATASET / "seq"
 DATA_ROOT  = _PROJECT / "data" / "processed"
+_MODEL_SUFFIX = f"_{AUGMENT}" if AUGMENT != "none" else ""
 MODEL_DIR  = _ROOT / "artifacts" / f"models_{DATASET}{_MODEL_SUFFIX}" / "cnn_gru"
 RESULT_DIR = _ROOT / "artifacts" / f"results_{DATASET}{_MODEL_SUFFIX}"
 
 
-# =========================================================
-# 유틸
-# =========================================================
 def set_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    random.seed(seed); np.random.seed(seed)
+    torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
 
 class SequenceDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32)   # argmax 방식: long 타입 필요
+        self.y = torch.tensor(y, dtype=torch.long)   # 2-class: long 필수
 
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+    def __len__(self): return len(self.X)
+    def __getitem__(self, idx): return self.X[idx], self.y[idx]
 
 
 class FocalLoss(nn.Module):
-    """
-    Focal Loss (Lin et al., 2017 - RetinaNet)
-    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-
-    alpha : 양성(봇넷) 클래스 가중치 (0.75 → 소수 클래스 집중)
-    gamma : focusing parameter (2.0 표준값)
-    """
+    """Multiclass Focal Loss (Normal / Botnet 2-class)"""
     def __init__(self, alpha: float = 0.75, gamma: float = 2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        targets = targets.float()   # 추가
-
-        bce_loss = F.binary_cross_entropy_with_logits(
-            logits, targets, reduction="none"
-        )
-        p_t = torch.exp(-bce_loss)
-        alpha_t = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
-        loss = alpha_t * (1.0 - p_t) ** self.gamma * bce_loss
-        return loss.mean()
+        # logits: (batch, 2)  targets: (batch,) long
+        weight  = torch.tensor([1.0 - self.alpha, self.alpha], device=logits.device)
+        ce_loss = F.cross_entropy(logits, targets, weight=weight, reduction="none")
+        p_t     = torch.exp(-ce_loss)
+        return ((1.0 - p_t) ** self.gamma * ce_loss).mean()
 
 
 class CNNGRUModel(nn.Module):
@@ -112,122 +80,94 @@ class CNNGRUModel(nn.Module):
         self.relu    = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
         self.gru     = nn.GRU(conv_channels, gru_hidden, num_layers=1, batch_first=True)
-        self.fc      = nn.Linear(gru_hidden, 1)
+        self.fc      = nn.Linear(gru_hidden, 2)   # 2-class: Normal / Botnet
 
     def forward(self, x):
         x = self.relu(self.conv1(x.permute(0, 2, 1)))
         x = self.dropout(x).permute(0, 2, 1)
         _, h_n = self.gru(x)
-        return self.fc(self.dropout(h_n[-1])).squeeze(1)
+        return self.fc(self.dropout(h_n[-1]))      # (batch, 2)
 
 
-def load_data(data_dir: Path):
+def load_data(data_dir):
     X = np.load(data_dir / "X_trainval.npy")
     y = np.load(data_dir / "y_trainval.npy").astype(int)
     return X, y
 
 
 def compute_metrics(y_true, y_pred, y_prob):
-    metrics = {
+    m = {
         "accuracy":  float(accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall":    float(recall_score(y_true, y_pred, zero_division=0)),
         "f1":        float(f1_score(y_true, y_pred, zero_division=0)),
         "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
         "classification_report": classification_report(
-            y_true, y_pred, digits=4, zero_division=0, output_dict=True
-        ),
+            y_true, y_pred, digits=4, zero_division=0, output_dict=True),
     }
-    try:
-        metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
-    except ValueError:
-        metrics["roc_auc"] = None
-    return metrics
-
-
-
+    try:    m["roc_auc"] = float(roc_auc_score(y_true, y_prob))
+    except: m["roc_auc"] = None
+    return m
 
 
 def collect_probs_and_loss(model, loader, device, criterion):
     model.eval()
-    total_loss = 0.0
-    y_true_all, y_prob_all = [], []
+    total_loss, y_true_all, y_prob_all = 0.0, [], []
     with torch.no_grad():
-        for X_batch, y_batch in loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            logits = model(X_batch)
-            probs  = torch.sigmoid(logits)
-            total_loss += criterion(logits, y_batch).item() * X_batch.size(0)
-            y_true_all.extend(y_batch.cpu().numpy().tolist())
+        for X_b, y_b in loader:
+            X_b, y_b = X_b.to(device), y_b.to(device)
+            logits = model(X_b)
+            probs  = torch.softmax(logits, dim=1)[:, 1]   # 봇넷 확률
+            total_loss += criterion(logits, y_b).item() * X_b.size(0)
+            y_true_all.extend(y_b.cpu().numpy().tolist())
             y_prob_all.extend(probs.cpu().numpy().tolist())
-    return (
-        total_loss / len(loader.dataset),
-        np.array(y_true_all).astype(int),
-        np.array(y_prob_all),
-    )
+    return (total_loss / len(loader.dataset),
+            np.array(y_true_all).astype(int),
+            np.array(y_prob_all))
 
 
 def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
-    n_features   = X_train.shape[2]
-    train_loader = DataLoader(SequenceDataset(X_train, y_train), batch_size=128, shuffle=True,  num_workers=0)
-    val_loader   = DataLoader(SequenceDataset(X_val,   y_val),   batch_size=256, shuffle=False, num_workers=0)
+    n_feat       = X_train.shape[2]
+    train_loader = DataLoader(SequenceDataset(X_train, y_train),
+                              batch_size=128, shuffle=True,  num_workers=0)
+    val_loader   = DataLoader(SequenceDataset(X_val,   y_val),
+                              batch_size=256, shuffle=False, num_workers=0)
 
-    model = CNNGRUModel(n_features=n_features, conv_channels=64, gru_hidden=64, dropout=0.3).to(device)
+    model     = CNNGRUModel(n_features=n_feat).to(device)
+    criterion = FocalLoss(alpha=0.75, gamma=2.0)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    criterion        = FocalLoss(alpha=0.75, gamma=2.0)
-    optimizer        = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    num_epochs       = 30
-    patience         = 6
-    min_epochs       = 20
-    best_score       = None
-    best_state       = None
-    best_threshold   = "argmax"
-    best_epoch       = 0
-    best_val_metrics = None
-    patience_counter = 0
+    num_epochs, patience, min_epochs = 30, 6, 20
+    best_score = best_state = best_val_metrics = None
+    best_threshold, best_epoch, patience_counter = "argmax", 0, 0
 
     for epoch in range(1, num_epochs + 1):
         model.train()
-        running_loss = 0.0
-        for X_batch, y_batch in train_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        running = 0.0
+        for X_b, y_b in train_loader:
+            X_b, y_b = X_b.to(device), y_b.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(X_batch), y_batch)
+            loss = criterion(model(X_b), y_b)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
-            running_loss += loss.item() * X_batch.size(0)
+            running += loss.item() * X_b.size(0)
 
-        train_loss = running_loss / len(train_loader.dataset)
-        val_loss, y_val_true, y_val_prob = collect_probs_and_loss(model, val_loader, device, criterion)
-        y_pred              = (y_val_prob >= 0.5).astype(int)
-        current_val_metrics = compute_metrics(y_val_true, y_pred, y_val_prob)
-        current_val_metrics["selected_threshold"] = 0.5
-        current_threshold   = 0.5
+        train_loss = running / len(train_loader.dataset)
+        val_loss, y_vt, y_vp = collect_probs_and_loss(model, val_loader, device, criterion)
+        y_pred = (y_vp >= 0.5).astype(int)
+        cvm    = compute_metrics(y_vt, y_pred, y_vp)
+        cvm["selected_threshold"] = "argmax"
 
-        current_score = (
-            current_val_metrics["f1"],
-            current_val_metrics["recall"],
-            current_val_metrics["precision"],
-            current_val_metrics["roc_auc"] if current_val_metrics["roc_auc"] is not None else -1.0,
-            -val_loss,
-        )
+        score = (cvm["f1"], cvm["recall"], cvm["precision"],
+                 cvm["roc_auc"] if cvm["roc_auc"] else -1.0, -val_loss)
 
-        print(
-            f"  [Fold {fold} Epoch {epoch:02d}] "
-            f"train={train_loss:.4f} | val={val_loss:.4f} | "
-            f"thr=0.50 | f1={current_val_metrics['f1']:.4f} | "
-            f"recall={current_val_metrics['recall']:.4f}"
-        )
+        print(f"  [Fold {fold} Epoch {epoch:02d}] train={train_loss:.4f} | "
+              f"val={val_loss:.4f} | argmax | f1={cvm['f1']:.4f} | recall={cvm['recall']:.4f}")
 
-        if best_score is None or current_score > best_score:
-            best_score       = current_score
-            best_state       = copy.deepcopy(model.state_dict())
-            best_threshold   = current_threshold
-            best_epoch       = epoch
-            best_val_metrics = current_val_metrics
-            patience_counter = 0
+        if best_score is None or score > best_score:
+            best_score, best_state = score, copy.deepcopy(model.state_dict())
+            best_epoch, best_val_metrics, patience_counter = epoch, cvm, 0
         else:
             patience_counter += 1
 
@@ -236,12 +176,12 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
             break
 
     model.load_state_dict(best_state)
-    best_val_metrics["selected_threshold"] = best_threshold
+    best_val_metrics["selected_threshold"] = "argmax"
     print(f"  [Fold {fold}] Best epoch: {best_epoch}")
-    return model, best_threshold, best_val_metrics, n_features
+    return model, "argmax", best_val_metrics, n_feat
 
 
-def print_fold_summary(fold_results: list[dict]) -> dict:
+def print_fold_summary(fold_results):
     keys = ["f1", "recall", "precision", "roc_auc", "accuracy"]
     summary = {}
     print(f"\n{'='*60}")
@@ -252,19 +192,16 @@ def print_fold_summary(fold_results: list[dict]) -> dict:
     print("-" * 52)
     for key in keys:
         vals = [r[key] for r in fold_results if r.get(key) is not None]
-        if not vals:
-            continue
+        if not vals: continue
         mean, std = float(np.mean(vals)), float(np.std(vals))
-        summary[key] = {"mean": mean, "std": std, "min": float(np.min(vals)), "max": float(np.max(vals))}
+        summary[key] = {"mean": mean, "std": std,
+                        "min": float(np.min(vals)), "max": float(np.max(vals))}
         marker = " ★" if key in ("f1", "recall") else ""
         print(f"{key:<14} {mean:>8.4f} {std:>10.4f} {np.min(vals):>8.4f} {np.max(vals):>8.4f}{marker}")
     print("=" * 60)
     return summary
 
 
-# =========================================================
-# main
-# =========================================================
 def main():
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -273,7 +210,7 @@ def main():
     print(f"[CONFIG] augment          : {AUGMENT}")
     print(f"[CONFIG] n_folds          : {N_FOLDS}")
     print(f"[CONFIG] target_bot_ratio : {TARGET_BOT_RATIO} "
-          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'}")
+          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'})")
     print(f"[CONFIG] data             : {DATA_DIR}")
     print(f"[INFO]   device           : {device}")
 
@@ -283,23 +220,14 @@ def main():
     X_all, y_all = load_data(DATA_DIR)
     print(f"[INFO] X_trainval shape : {X_all.shape}")
     print(f"[INFO] Botnet ratio     : {y_all.mean():.4f}")
-
-    # Benign 서브샘플링 (봇넷 전부 유지, test는 절대 건드리지 않음)
-    if TARGET_BOT_RATIO > 0:
-        from augment_utils import subsample_benign
-        X_all, y_all = subsample_benign(
-            X_all.reshape(len(X_all), -1), y_all, TARGET_BOT_RATIO
-        )
-        n_feat = X_all.shape[1]
-        X_all  = X_all.reshape(-1, n_feat, 1)
-    print(f"[INFO] 학습 shape: {X_all.shape}  Bot={y_all.sum():,}")
+    print(f"[INFO] K-fold 전 shape: {X_all.shape}  Bot={y_all.sum():,}"
+          f" (subsample은 각 fold train에만 적용)")
 
     kf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
-
     fold_results    = []
     best_fold_score = None
     best_fold_model = None
-    best_fold_thr   = 0.5
+    best_fold_thr   = "argmax"
     best_fold_idx   = -1
     best_n_features = X_all.shape[2]
 
@@ -308,6 +236,15 @@ def main():
         X_train, X_val = X_all[train_idx], X_all[val_idx]
         y_train, y_val = y_all[train_idx], y_all[val_idx]
 
+        # train fold에만 subsample 적용 — val은 원본 분포 유지
+        if TARGET_BOT_RATIO > 0:
+            from augment_utils import subsample_benign
+            _nf = X_train.shape[1]
+            X_train_f, y_train = subsample_benign(
+                X_train.reshape(len(X_train), -1), y_train, TARGET_BOT_RATIO
+            )
+            X_train = X_train_f.reshape(-1, _nf, 1)
+
         # train fold에만 증강 적용 — val fold는 항상 원본 유지
         X_train, y_train = augment_train_fold(
             X_train, y_train, AUGMENT, DATASET, DATA_ROOT
@@ -315,56 +252,43 @@ def main():
         if AUGMENT != "none":
             print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
 
-        # ← 이 줄이 빠져있었음
         model, thr, metrics, n_feat = train_one_fold(
             X_train, y_train, X_val, y_val, device, fold
         )
-
         metrics["fold"] = fold
         fold_results.append(metrics)
 
-        print(
-            f"  → F1={metrics['f1']:.4f} | "
-            f"Recall={metrics['recall']:.4f} | "
-            f"Precision={metrics['precision']:.4f} | "
-            f"ROC-AUC={metrics.get('roc_auc', 0):.4f}"
-        )
+        print(f"  → F1={metrics['f1']:.4f} | Recall={metrics['recall']:.4f} | "
+              f"Precision={metrics['precision']:.4f} | ROC-AUC={metrics.get('roc_auc',0):.4f}")
 
         score = (metrics["f1"], metrics["recall"])
         if best_fold_score is None or score > best_fold_score:
             best_fold_score = score
             best_fold_model = model
-            best_fold_thr   = 0.5
+            best_fold_thr   = thr
             best_fold_idx   = fold
             best_n_features = n_feat
 
     summary = print_fold_summary(fold_results)
     print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
 
-    torch.save(
-        {
-            "model_state_dict": best_fold_model.state_dict(),
-            "n_classes":     2,
-            "n_features":    best_n_features,
-            "window_size":   X_all.shape[1],
-            "conv_channels": 64,
-            "gru_hidden":    64,
-            "dropout":       0.3,
-        },
-        MODEL_DIR / "cnn_gru_flow.pt",
-    )
+    torch.save({
+        "model_state_dict": best_fold_model.state_dict(),
+        "n_classes":     2,
+        "n_features":    best_n_features,
+        "window_size":   X_all.shape[1],
+        "conv_channels": 64,
+        "gru_hidden":    64,
+        "dropout":       0.3,
+    }, MODEL_DIR / "cnn_gru_flow.pt")
 
     with open(MODEL_DIR / "cnn_gru_flow_threshold.json", "w", encoding="utf-8") as f:
         json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
 
     output = {
-        "dataset":        DATASET,
-        "augment":        AUGMENT,
-        "n_folds":        N_FOLDS,
+        "dataset": DATASET, "augment": AUGMENT, "n_folds": N_FOLDS,
         "primary_metric": ["f1", "recall"],
-        "summary":        summary,
-        "fold_results":   fold_results,
-        "best_fold":      best_fold_idx,
+        "summary": summary, "fold_results": fold_results, "best_fold": best_fold_idx,
     }
     with open(RESULT_DIR / "cnn_gru_flow_kfold_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)
