@@ -126,15 +126,16 @@ def collect_probs_and_loss(model, loader, device, criterion):
             np.array(y_prob_all))
 
 
-def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
+def train_one_fold(X_train, y_train, X_val, y_val, device, fold, criterion=None):
     n_feat       = X_train.shape[2]
     train_loader = DataLoader(SequenceDataset(X_train, y_train),
                               batch_size=128, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(SequenceDataset(X_val,   y_val),
                               batch_size=256, shuffle=False, num_workers=0)
 
-    model     = CNNGRUModel(n_features=n_feat).to(device)
-    criterion = FocalLoss(alpha=0.75, gamma=2.0)
+    model = CNNGRUModel(n_features=n_feat).to(device)
+    if criterion is None:
+        criterion = FocalLoss(alpha=0.75, gamma=2.0)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     num_epochs, patience, min_epochs = 30, 6, 20
@@ -252,8 +253,11 @@ def main():
         if AUGMENT != "none":
             print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
 
+        # 증강 시 FocalLoss 대신 CrossEntropyLoss (이중 보정 방지)
+        criterion = (nn.CrossEntropyLoss() if AUGMENT != "none"
+                     else FocalLoss(alpha=0.75, gamma=2.0))
         model, thr, metrics, n_feat = train_one_fold(
-            X_train, y_train, X_val, y_val, device, fold
+            X_train, y_train, X_val, y_val, device, fold, criterion=criterion
         )
         metrics["fold"] = fold
         fold_results.append(metrics)

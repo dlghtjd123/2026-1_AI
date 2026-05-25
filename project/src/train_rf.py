@@ -161,9 +161,11 @@ def main():
         if AUGMENT != "none":
             print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
 
-        # ── RF class_weight: 증강 여부와 관계없이 항상 balanced_subsample ──
-        # DEBUG 시 이중 보정 여부 확인 가능
-        class_weight = "balanced_subsample"
+        # RF class_weight:
+        # - 증강 없음(none): balanced_subsample로 불균형 보정
+        # - 증강 있음(smote/gan/wcgan_gp): 이미 subsample+증강으로 보정 → class_weight 제거
+        class_weight = None if AUGMENT != "none" else "balanced_subsample"
+        print(f"  [RF] class_weight={class_weight}")
 
         model = RandomForestClassifier(
             n_estimators=500,

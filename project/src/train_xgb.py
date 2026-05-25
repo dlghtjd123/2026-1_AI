@@ -130,20 +130,18 @@ def main():
             from augment_utils import subsample_benign
             X_train, y_train = subsample_benign(X_train, y_train, TARGET_BOT_RATIO)
 
-        # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if TARGET_BOT_RATIO > 0:
-            from augment_utils import subsample_benign
-            X_train, y_train = subsample_benign(X_train, y_train, TARGET_BOT_RATIO)
-
         X_train, y_train = augment_train_fold(
             X_train, y_train, AUGMENT, DATASET, DATA_ROOT
         )
         if AUGMENT != "none":
             print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
 
-        pos_count        = int(np.sum(y_train == 1))
-        neg_count        = int(np.sum(y_train == 0))
-        scale_pos_weight = float(np.sqrt(neg_count / pos_count))
+        pos_count = int(np.sum(y_train == 1))
+        neg_count = int(np.sum(y_train == 0))
+        # 증강 시 scale_pos_weight=1.0 (이미 subsample/증강으로 보정)
+        # 증강 없을 때만 class imbalance 보정
+        scale_pos_weight = 1.0 if AUGMENT != "none" else float(np.sqrt(neg_count / pos_count))
+        print(f"  [XGB] scale_pos_weight={scale_pos_weight:.2f}")
 
         model = XGBClassifier(
             n_estimators=1000,
