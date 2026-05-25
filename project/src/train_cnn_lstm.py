@@ -283,7 +283,7 @@ def main():
     print(f"[CONFIG] n_folds : {N_FOLDS}")
     print(f"[CONFIG] debug           : {DEBUG}")
     print(f"[CONFIG] target_bot_ratio: {TARGET_BOT_RATIO} "
-          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'})")
+          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.1f}:{TARGET_BOT_RATIO*100:.2f}'})")
     print(f"[CONFIG] data    : {DATA_DIR}")
     print(f"[INFO]   device  : {device}")
     print(f"[INFO]   Focal Loss alpha={FOCAL_ALPHA}  "
@@ -359,7 +359,8 @@ def main():
                 y_prob=val_prob,
                 y_train_orig=y_train_orig,
                 y_train_aug=y_train if AUGMENT != "none" else None,
-                pos_weight=FOCAL_POS_EQUIV,   # Focal Loss alpha 등가값
+                # CrossEntropyLoss 사용 시 pos_weight=None (이중 보정 아님)
+                pos_weight=None if AUGMENT != "none" else FOCAL_POS_EQUIV,
                 augment=AUGMENT,
             )
 

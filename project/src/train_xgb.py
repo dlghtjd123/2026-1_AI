@@ -98,7 +98,7 @@ def main():
     print(f"[CONFIG] augment          : {AUGMENT}")
     print(f"[CONFIG] n_folds          : {N_FOLDS}")
     print(f"[CONFIG] target_bot_ratio : {TARGET_BOT_RATIO} "
-          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'})")
+          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.1f}:{TARGET_BOT_RATIO*100:.2f}'})")
     print(f"[CONFIG] data             : {DATA_DIR}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)

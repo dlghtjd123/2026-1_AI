@@ -354,7 +354,7 @@ def main():
     print(f"  MODEL_DIR        = {MODEL_DIR}")
     print(f"  RESULT_DIR       = {RESULT_DIR}")
     print(f"  학습 bot 비율    = {TARGET_BOT_RATIO} "
-          f"({'전체' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'})")
+          f"({'전체' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.1f}:{TARGET_BOT_RATIO*100:.2f}'})")
     print(f"  test set         = 원본 유지 (subsample 없음)")
     print(f"  ★ 주 지표 = F1-score, Recall  /  보조: ROC-AUC")
     print("=" * 72)

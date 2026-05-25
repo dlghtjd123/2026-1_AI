@@ -69,17 +69,28 @@ def debug_fold(
 
     # ── 2. 모델 내부 클래스 보정 ───────────────────────────
     print("\n  [DEBUG-2] 모델 내부 클래스 보정값")
+    has_compensation = False
     if class_weight is not None:
-        print(f"    class_weight     : {class_weight}  "
-              f"{'⚠️ 이중 보정 의심' if class_weight not in (None, 1, 'none') else 'OK'}")
+        status = "⚠️ 이중 보정 의심" if (augment != "none" and class_weight not in (None, "none")) else "정상"
+        print(f"    class_weight     : {class_weight}  {status}")
+        if augment != "none" and class_weight not in (None, "none"):
+            has_compensation = True
     if scale_pos_weight is not None:
-        print(f"    scale_pos_weight : {scale_pos_weight:.4f}  "
-              f"{'⚠️ 이중 보정 의심' if scale_pos_weight > 1.5 else 'OK'}")
+        status = "⚠️ 이중 보정 의심" if (augment != "none" and scale_pos_weight > 1.5) else "정상"
+        print(f"    scale_pos_weight : {scale_pos_weight:.4f}  {status}")
+        if augment != "none" and scale_pos_weight > 1.5:
+            has_compensation = True
     if pos_weight is not None:
-        print(f"    pos_weight       : {pos_weight:.4f}  "
-              f"{'⚠️ 이중 보정 의심' if pos_weight > 1.5 else 'OK'}")
+        # pos_weight가 None이면 CrossEntropyLoss 사용 중 (이중 보정 없음)
+        status = "⚠️ 이중 보정 의심" if (augment != "none" and pos_weight > 1.5) else "정상"
+        print(f"    pos_weight       : {pos_weight:.4f}  {status}")
+        if augment != "none" and pos_weight > 1.5:
+            has_compensation = True
     if all(v is None for v in [class_weight, scale_pos_weight, pos_weight]):
-        print(f"    보정값 없음 (증강만 적용)")
+        if augment != "none":
+            print(f"    보정값 없음 → CrossEntropyLoss / 증강만으로 균형 처리 ✅")
+        else:
+            print(f"    보정값 없음")
 
     # ── 3. Confusion Matrix ────────────────────────────────
     print("\n  [DEBUG-3] Confusion Matrix")
