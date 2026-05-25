@@ -34,8 +34,8 @@ _parser.add_argument("--augment", type=str, default="none",
 _parser.add_argument("--dataset", type=str, default="cicids2017",
                      choices=["cicids2017", "cicids2018", "ctu13"], help="학습 데이터셋 선택")
 _parser.add_argument("--n_folds", type=int, default=5, help="K-fold 수 (기본값: 5)")
-_parser.add_argument("--target_bot_ratio", type=float, default=0.05,
-                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.05=95:5, 0=전체 사용)")
+_parser.add_argument("--target_bot_ratio", type=float, default=0.005,
+                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.005=99.5:0.5, 0=전체 사용)")
 AUGMENT          = _parser.parse_args().augment
 DATASET          = _parser.parse_args().dataset
 N_FOLDS          = _parser.parse_args().n_folds

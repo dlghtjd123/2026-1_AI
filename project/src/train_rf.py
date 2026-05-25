@@ -33,8 +33,8 @@ _parser.add_argument("--dataset",  type=str, default="cicids2017",
 _parser.add_argument("--n_folds",  type=int, default=5)
 _parser.add_argument("--debug",    action="store_true",
                      help="디버그 모드: 원인 분석 로그 출력 (--augment 사용 시 권장)")
-_parser.add_argument("--target_bot_ratio", type=float, default=0.05,
-                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.05=95:5, 0=전체 사용)")
+_parser.add_argument("--target_bot_ratio", type=float, default=0.005,
+                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.005=99.5:0.5, 0=전체 사용)")
 AUGMENT          = _parser.parse_args().augment
 DATASET          = _parser.parse_args().dataset
 N_FOLDS          = _parser.parse_args().n_folds
