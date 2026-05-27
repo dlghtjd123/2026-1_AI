@@ -37,12 +37,13 @@ _parser.add_argument("--max_normal", type=int, default=500_000,
                      help="fold당 최대 정상 샘플 수 상한 (기본값: 500000, 0=제한 없음)")
 _parser.add_argument("--max_mismatch", type=float, default=10.0,
                      help="train/val 봇넷 비율 최대 배수 (기본값: 10)")
-AUGMENT          = _parser.parse_args().augment
-DATASET          = _parser.parse_args().dataset
-N_FOLDS          = _parser.parse_args().n_folds
-DEBUG            = _parser.parse_args().debug
-MAX_NORMAL   = _parser.parse_args().max_normal
-MAX_MISMATCH = _parser.parse_args().max_mismatch
+_args = _parser.parse_args()
+AUGMENT      = _args.augment
+DATASET      = _args.dataset
+N_FOLDS      = _args.n_folds
+DEBUG        = _args.debug
+MAX_NORMAL   = _args.max_normal
+MAX_MISMATCH = _args.max_mismatch
 
 
 # =========================================================
@@ -84,6 +85,32 @@ def compute_metrics(y_true, y_pred, y_prob):
     except ValueError:
         metrics["roc_auc"] = None
     return metrics
+
+
+def build_model(class_weight):
+    return RandomForestClassifier(
+        n_estimators=500,
+        max_depth=20,
+        min_samples_split=2,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        class_weight=class_weight,
+        random_state=42,
+        n_jobs=-1,
+    )
+
+
+def prepare_train_data(X, y, fold_id=None):
+    y_train_orig = y.copy()
+    if MAX_NORMAL > 0:
+        from augment_utils import subsample_benign
+        X, y = subsample_benign(
+            X, y, max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
+        )
+        y_train_orig = y.copy()
+
+    X, y = augment_train_fold(X, y, AUGMENT, DATASET, DATA_ROOT, fold_id=fold_id)
+    return X, y, y_train_orig
 
 
 def print_fold_summary(fold_results: list[dict]) -> dict:
@@ -149,20 +176,7 @@ def main():
         y_train, y_val = y_all[train_idx], y_all[val_idx]
 
         # 증강 전 라벨 저장 (debug용)
-        y_train_orig = y_train.copy()
-
-        # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if MAX_NORMAL > 0:
-            from augment_utils import subsample_benign
-            X_train, y_train = subsample_benign(
-                X_train, y_train, max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
-            )
-            y_train_orig = y_train.copy()  # subsample 후 orig 갱신
-
-        # train fold에만 증강 적용 — val fold는 항상 원본 유지
-        X_train, y_train = augment_train_fold(
-            X_train, y_train, AUGMENT, DATASET, DATA_ROOT
-        )
+        X_train, y_train, y_train_orig = prepare_train_data(X_train, y_train, fold_id=fold)
         if AUGMENT != "none":
             print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
 
@@ -172,16 +186,7 @@ def main():
         class_weight = None if AUGMENT != "none" else "balanced_subsample"
         print(f"  [RF] class_weight={class_weight}")
 
-        model = RandomForestClassifier(
-            n_estimators=500,
-            max_depth=20,
-            min_samples_split=2,
-            min_samples_leaf=2,
-            max_features="sqrt",
-            class_weight=class_weight,
-            random_state=42,
-            n_jobs=-1,
-        )
+        model = build_model(class_weight)
         model.fit(X_train, y_train)
 
         val_prob    = model.predict_proba(X_val)[:, 1]
@@ -225,11 +230,22 @@ def main():
     summary = print_fold_summary(fold_results)
     print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
 
+    print("\n[FINAL] trainval 전체로 최종 RF 모델 재학습")
+    X_final, y_final, _ = prepare_train_data(X_all, y_all, fold_id="final")
+    final_class_weight = None if AUGMENT != "none" else "balanced_subsample"
+    final_model = build_model(final_class_weight)
+    final_model.fit(X_final, y_final)
+    print(f"[FINAL] train={len(y_final):,}  Bot 비율={y_final.mean():.4f}")
+
     # ── 저장 ─────────────────────────────────────────────
-    joblib.dump(best_fold_model, MODEL_DIR / "rf_flow.pkl")
+    joblib.dump(final_model, MODEL_DIR / "rf_flow.pkl")
 
     with open(MODEL_DIR / "rf_flow_threshold.json", "w", encoding="utf-8") as f:
-        json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
+        json.dump({
+            "threshold": best_fold_thr,
+            "best_fold": best_fold_idx,
+            "saved_model": "final_trainval_refit",
+        }, f, indent=4)
 
     output = {
         "dataset":        DATASET,
@@ -239,6 +255,7 @@ def main():
         "summary":        summary,
         "fold_results":   fold_results,
         "best_fold":      best_fold_idx,
+        "saved_model":    "final_trainval_refit",
     }
     with open(RESULT_DIR / "rf_flow_kfold_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)

@@ -41,9 +41,10 @@ _parser.add_argument("--augment", type=str, default="none",
                      choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"])
 _parser.add_argument("--bot_ratio_factor", type=float, default=10.0,
                      help="학습 시 사용한 봇넷 비율 배수 (정보 표시용)")
-DATASET          = _parser.parse_args().dataset
-AUGMENT          = _parser.parse_args().augment
-BOT_RATIO_FACTOR = _parser.parse_args().bot_ratio_factor
+_args = _parser.parse_args()
+DATASET          = _args.dataset
+AUGMENT          = _args.augment
+BOT_RATIO_FACTOR = _args.bot_ratio_factor
 
 
 # =========================================================
@@ -298,7 +299,7 @@ def run_evaluation(flat_dir: Path, seq_dir: Path) -> dict:
         thr_f = float(thr) if thr != "argmax" else 0.5
         pred  = (prob >= thr_f).astype(int)
         m     = compute_metrics(y, pred, prob)
-        m["decision"] = "argmax"   # 0.5 threshold = argmax (이진 분류에서 동치)
+        m["decision"] = "argmax" if thr == "argmax" or thr_f == 0.5 else f"{thr_f:.2f}"
         return m
 
     def eval_seq(ckpt, mtype, thr, X, y):
@@ -333,7 +334,7 @@ def save_results(results: dict) -> None:
         "augment":          AUGMENT,
         "primary_metric":   ["f1", "recall"],
         "secondary_metric": "roc_auc",
-        "note":             "K-fold 학습 후 holdout test set 최종 평가",
+        "note":             "K-fold로 설정을 선택한 뒤 trainval 전체로 재학습한 최종 모델의 holdout test 평가",
         "test_results":     results,
     }
     out_path = RESULT_DIR / "eval_results.json"

@@ -36,12 +36,13 @@ _parser.add_argument("--max_normal", type=int, default=500_000,
                      help="fold당 최대 정상 샘플 수 상한 (기본값: 500000, 0=제한 없음)")
 _parser.add_argument("--max_mismatch", type=float, default=10.0,
                      help="train/val 봇넷 비율 최대 배수 (기본값: 10)")
-AUGMENT      = _parser.parse_args().augment
-DATASET      = _parser.parse_args().dataset
-N_FOLDS      = _parser.parse_args().n_folds
-DEBUG        = _parser.parse_args().debug
-MAX_NORMAL   = _parser.parse_args().max_normal
-MAX_MISMATCH = _parser.parse_args().max_mismatch
+_args = _parser.parse_args()
+AUGMENT      = _args.augment
+DATASET      = _args.dataset
+N_FOLDS      = _args.n_folds
+DEBUG        = _args.debug
+MAX_NORMAL   = _args.max_normal
+MAX_MISMATCH = _args.max_mismatch
 
 # Focal Loss alpha → pos_weight 등가값 (이중 보정 진단용)
 # alpha=0.75 → 봇넷 클래스가 정상 대비 0.75/0.25 = 3.0배 가중
@@ -165,7 +166,7 @@ def collect_probs_and_loss(model, loader, device, criterion):
 def train_one_fold(X_train, y_train, X_val, y_val, device, fold, criterion=None):
     """
     Returns:
-        model, threshold, best_val_metrics, n_features, best_val_prob
+        model, threshold, best_val_metrics, n_features, best_val_prob, best_epoch
         ↑ best_val_prob 추가 — debug_fold에서 확률 분포 분석용
     """
     n_features   = X_train.shape[2]
@@ -243,7 +244,51 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold, criterion=None)
     model.load_state_dict(best_state)
     best_val_metrics["selected_threshold"] = best_threshold
     print(f"  [Fold {fold}] Best epoch: {best_epoch}")
-    return model, best_threshold, best_val_metrics, n_features, best_val_prob
+    return model, best_threshold, best_val_metrics, n_features, best_val_prob, best_epoch
+
+
+def prepare_train_data(X, y, fold_id=None):
+    y_train_orig = y.copy()
+    if MAX_NORMAL > 0:
+        from augment_utils import subsample_benign
+        _nf = X.shape[1]
+        X_f, y = subsample_benign(
+            X.reshape(len(X), -1), y,
+            max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
+        )
+        X = X_f.reshape(-1, _nf, 1)
+        y_train_orig = y.copy()
+
+    X, y = augment_train_fold(X, y, AUGMENT, DATASET, DATA_ROOT, fold_id=fold_id)
+    return X, y, y_train_orig
+
+
+def build_criterion():
+    return nn.CrossEntropyLoss() if AUGMENT != "none" else FocalLoss(alpha=FOCAL_ALPHA, gamma=2.0)
+
+
+def train_final_model(X_train, y_train, device, num_epochs, criterion):
+    n_features = X_train.shape[2]
+    loader = DataLoader(SequenceDataset(X_train, y_train),
+                        batch_size=128, shuffle=True, num_workers=0)
+    model = CNNGRUModel(n_features=n_features).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        running_loss = 0.0
+        for X_batch, y_batch in loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(X_batch), y_batch)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+            running_loss += loss.item() * X_batch.size(0)
+        print(f"  [FINAL Epoch {epoch:02d}/{num_epochs:02d}] "
+              f"train={running_loss / len(loader.dataset):.4f}")
+
+    return model, n_features
 
 
 def print_fold_summary(fold_results: list[dict]) -> dict:
@@ -305,37 +350,19 @@ def main():
     best_fold_thr   = "argmax"
     best_fold_idx   = -1
     best_n_features = X_all.shape[2]
+    best_epoch       = 30
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(X_all, y_all), 1):
         print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
         X_train, X_val = X_all[train_idx], X_all[val_idx]
         y_train, y_val = y_all[train_idx], y_all[val_idx]
 
-        # 증강 전 라벨 저장 (debug용)
-        y_train_orig = y_train.copy()
-
-        # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if MAX_NORMAL > 0:
-            from augment_utils import subsample_benign
-            _nf = X_train.shape[1]
-            X_train_f, y_train = subsample_benign(
-                X_train.reshape(len(X_train), -1), y_train,
-                max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
-            )
-            X_train = X_train_f.reshape(-1, _nf, 1)
-            y_train_orig = y_train.copy()  # subsample 후 orig 갱신
-
-        # train fold에만 증강 — val fold는 항상 원본 유지
-        X_train, y_train = augment_train_fold(
-            X_train, y_train, AUGMENT, DATASET, DATA_ROOT
-        )
+        X_train, y_train, y_train_orig = prepare_train_data(X_train, y_train, fold_id=fold)
         if AUGMENT != "none":
             print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
 
-        # 증강 시 FocalLoss 대신 CrossEntropyLoss (이중 보정 방지)
-        criterion = (nn.CrossEntropyLoss() if AUGMENT != "none"
-                     else FocalLoss(alpha=FOCAL_ALPHA, gamma=2.0))
-        model, thr, metrics, n_feat, val_prob = train_one_fold(
+        criterion = build_criterion()
+        model, thr, metrics, n_feat, val_prob, fold_best_epoch = train_one_fold(
             X_train, y_train, X_val, y_val, device, fold, criterion=criterion
         )
         metrics["fold"] = fold
@@ -370,13 +397,22 @@ def main():
             best_fold_thr   = thr
             best_fold_idx   = fold
             best_n_features = n_feat
+            best_epoch      = fold_best_epoch
 
     summary = print_fold_summary(fold_results)
     print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
 
+    print("\n[FINAL] trainval 전체로 최종 CNN-GRU 모델 재학습")
+    X_final, y_final, _ = prepare_train_data(X_all, y_all, fold_id="final")
+    final_model, best_n_features = train_final_model(
+        X_final, y_final, device, best_epoch, build_criterion()
+    )
+    print(f"[FINAL] train={len(y_final):,}  Bot 비율={y_final.mean():.4f}  "
+          f"epochs={best_epoch}")
+
     torch.save(
         {
-            "model_state_dict": best_fold_model.state_dict(),
+            "model_state_dict": final_model.state_dict(),
             "n_features":    best_n_features,
             "n_classes":     2,
             "window_size":   X_all.shape[1],
@@ -388,7 +424,12 @@ def main():
     )
 
     with open(MODEL_DIR / "cnn_gru_flow_threshold.json", "w", encoding="utf-8") as f:
-        json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
+        json.dump({
+            "threshold": best_fold_thr,
+            "best_fold": best_fold_idx,
+            "best_epoch": best_epoch,
+            "saved_model": "final_trainval_refit",
+        }, f, indent=4)
 
     output = {
         "dataset":        DATASET,
@@ -398,6 +439,8 @@ def main():
         "summary":        summary,
         "fold_results":   fold_results,
         "best_fold":      best_fold_idx,
+        "best_epoch":     best_epoch,
+        "saved_model":    "final_trainval_refit",
     }
     with open(RESULT_DIR / "cnn_gru_flow_kfold_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)

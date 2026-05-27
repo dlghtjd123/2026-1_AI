@@ -78,6 +78,46 @@ def compute_metrics(y_true, y_pred, y_prob):
     return metrics
 
 
+def build_model(scale_pos_weight: float, n_estimators: int = 1000,
+                early_stopping_rounds: int | None = 50):
+    kwargs = {
+        "n_estimators": n_estimators,
+        "max_depth": 6,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "objective": "binary:logistic",
+        "eval_metric": "logloss",
+        "random_state": 42,
+        "n_jobs": -1,
+        "scale_pos_weight": scale_pos_weight,
+        "tree_method": "hist",
+        "device": "cuda",
+    }
+    if early_stopping_rounds is not None:
+        kwargs["early_stopping_rounds"] = early_stopping_rounds
+    return XGBClassifier(**kwargs)
+
+
+def prepare_train_data(X, y, fold_id=None):
+    y_train_orig = y.copy()
+    if MAX_NORMAL > 0:
+        from augment_utils import subsample_benign
+        X, y = subsample_benign(
+            X, y, max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
+        )
+        y_train_orig = y.copy()
+
+    X, y = augment_train_fold(X, y, AUGMENT, DATASET, DATA_ROOT, fold_id=fold_id)
+    return X, y, y_train_orig
+
+
+def compute_scale_pos_weight(y):
+    pos_count = int(np.sum(y == 1))
+    neg_count = int(np.sum(y == 0))
+    return 1.0 if AUGMENT != "none" else float(np.sqrt(neg_count / pos_count))
+
+
 def print_fold_summary(fold_results: list[dict]) -> dict:
     keys = ["f1", "recall", "precision", "roc_auc", "accuracy"]
     summary = {}
@@ -127,6 +167,7 @@ def main():
     best_fold_model = None
     best_fold_thr   = 0.5
     best_fold_idx   = -1
+    best_n_estimators = 1000
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(X_all, y_all), 1):
         print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
@@ -134,46 +175,14 @@ def main():
         X_train, X_val = X_all[train_idx], X_all[val_idx]
         y_train, y_val = y_all[train_idx], y_all[val_idx]
 
-        # 증강 전 라벨 저장 (debug용)
-        y_train_orig = y_train.copy()
-
-        # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if MAX_NORMAL > 0:
-            from augment_utils import subsample_benign
-            X_train, y_train = subsample_benign(
-                X_train, y_train, max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
-            )
-            y_train_orig = y_train.copy()  # subsample 후 orig 갱신
-
-        # train fold에만 증강 적용 — val fold는 항상 원본 유지
-        X_train, y_train = augment_train_fold(
-            X_train, y_train, AUGMENT, DATASET, DATA_ROOT
-        )
+        X_train, y_train, y_train_orig = prepare_train_data(X_train, y_train, fold_id=fold)
         if AUGMENT != "none":
             print(f"  [AUG] train: {len(y_train):,}  val: {len(y_val):,} (원본)")
 
-        pos_count = int(np.sum(y_train == 1))
-        neg_count = int(np.sum(y_train == 0))
-        # 증강 시 scale_pos_weight=1.0 (이미 subsample/증강으로 보정)
-        # 증강 없을 때만 class imbalance 보정
-        scale_pos_weight = 1.0 if AUGMENT != "none" else float(np.sqrt(neg_count / pos_count))
+        scale_pos_weight = compute_scale_pos_weight(y_train)
         print(f"  [XGB] scale_pos_weight={scale_pos_weight:.2f}")
 
-        model = XGBClassifier(
-            n_estimators=1000,
-            max_depth=6,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            random_state=42,
-            n_jobs=-1,
-            scale_pos_weight=scale_pos_weight,
-            early_stopping_rounds=50,
-            tree_method="hist",
-            device="cuda",
-        )
+        model = build_model(scale_pos_weight, n_estimators=1000, early_stopping_rounds=50)
         model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
         val_prob    = model.predict_proba(X_val)[:, 1]
@@ -208,14 +217,33 @@ def main():
             best_fold_model = model
             best_fold_thr   = 0.5
             best_fold_idx   = fold
+            best_iter = getattr(model, "best_iteration", None)
+            best_n_estimators = int(best_iter + 1) if best_iter is not None else 1000
 
     summary = print_fold_summary(fold_results)
     print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
 
-    joblib.dump(best_fold_model, MODEL_DIR / "xgb_flow.pkl")
+    print("\n[FINAL] trainval 전체로 최종 XGBoost 모델 재학습")
+    X_final, y_final, _ = prepare_train_data(X_all, y_all, fold_id="final")
+    final_spw = compute_scale_pos_weight(y_final)
+    final_model = build_model(
+        final_spw,
+        n_estimators=best_n_estimators,
+        early_stopping_rounds=None,
+    )
+    final_model.fit(X_final, y_final, verbose=False)
+    print(f"[FINAL] train={len(y_final):,}  Bot 비율={y_final.mean():.4f}  "
+          f"n_estimators={best_n_estimators}")
+
+    joblib.dump(final_model, MODEL_DIR / "xgb_flow.pkl")
 
     with open(MODEL_DIR / "xgb_flow_threshold.json", "w", encoding="utf-8") as f:
-        json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
+        json.dump({
+            "threshold": best_fold_thr,
+            "best_fold": best_fold_idx,
+            "best_n_estimators": best_n_estimators,
+            "saved_model": "final_trainval_refit",
+        }, f, indent=4)
 
     output = {
         "dataset": DATASET, 
@@ -225,6 +253,8 @@ def main():
         "summary": summary, 
         "fold_results": fold_results, 
         "best_fold": best_fold_idx,
+        "best_n_estimators": best_n_estimators,
+        "saved_model": "final_trainval_refit",
     }
     with open(RESULT_DIR / "xgb_flow_kfold_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)
