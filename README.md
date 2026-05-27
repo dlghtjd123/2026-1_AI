@@ -210,9 +210,26 @@ python evaluate.py --dataset ctu13      --augment smote
 ```bash
 python augment_gan.py --dataset [cicids2017/cicids2018/ctu13]
 
+# CIC-IDS2017
 python train_rf.py       --dataset cicids2017 --augment gan --max_normal 500000 --max_mismatch 7
-python train_rf.py       --dataset ctu13      --augment gan --max_normal 500000 --max_mismatch 2
-# ... (동일 패턴)
+python train_xgb.py      --dataset cicids2017 --augment gan --max_normal 500000 --max_mismatch 7
+python train_cnn_lstm.py --dataset cicids2017 --augment gan --max_normal 500000 --max_mismatch 7
+python train_gru.py      --dataset cicids2017 --augment gan --max_normal 500000 --max_mismatch 7
+python train_cnn_gru.py  --dataset cicids2017 --augment gan --max_normal 500000 --max_mismatch 7
+
+# CIC-IDS2018
+python train_rf.py       --dataset cicids2018 --augment gan --max_normal 500000 --max_mismatch 2
+python train_xgb.py      --dataset cicids2018 --augment gan --max_normal 500000 --max_mismatch 2
+python train_cnn_lstm.py --dataset cicids2018 --augment gan --max_normal 500000 --max_mismatch 2
+python train_gru.py      --dataset cicids2018 --augment gan --max_normal 500000 --max_mismatch 2
+python train_cnn_gru.py  --dataset cicids2018 --augment gan --max_normal 500000 --max_mismatch 2
+
+# CTU-13
+python train_rf.py       --dataset ctu13 --augment gan --max_normal 500000 --max_mismatch 2
+python train_xgb.py      --dataset ctu13 --augment gan --max_normal 500000 --max_mismatch 2
+python train_cnn_lstm.py --dataset ctu13 --augment gan --max_normal 500000 --max_mismatch 2
+python train_gru.py      --dataset ctu13 --augment gan --max_normal 500000 --max_mismatch 2
+python train_cnn_gru.py  --dataset ctu13 --augment gan --max_normal 500000 --max_mismatch 2
 
 python evaluate.py --dataset cicids2017 --augment gan
 python evaluate.py --dataset cicids2018 --augment gan
@@ -224,9 +241,26 @@ python evaluate.py --dataset ctu13      --augment gan
 ```bash
 python augment_wcgan_gp.py --dataset [cicids2017/cicids2018/ctu13]
 
+# CIC-IDS2017
 python train_rf.py       --dataset cicids2017 --augment wcgan_gp --max_normal 500000 --max_mismatch 7
-python train_rf.py       --dataset ctu13      --augment wcgan_gp --max_normal 500000 --max_mismatch 2
-# ... (동일 패턴)
+python train_xgb.py      --dataset cicids2017 --augment wcgan_gp --max_normal 500000 --max_mismatch 7
+python train_cnn_lstm.py --dataset cicids2017 --augment wcgan_gp --max_normal 500000 --max_mismatch 7
+python train_gru.py      --dataset cicids2017 --augment wcgan_gp --max_normal 500000 --max_mismatch 7
+python train_cnn_gru.py  --dataset cicids2017 --augment wcgan_gp --max_normal 500000 --max_mismatch 7
+
+# CIC-IDS2018
+python train_rf.py       --dataset cicids2018 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_xgb.py      --dataset cicids2018 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_cnn_lstm.py --dataset cicids2018 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_gru.py      --dataset cicids2018 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_cnn_gru.py  --dataset cicids2018 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+
+# CTU-13
+python train_rf.py       --dataset ctu13 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_xgb.py      --dataset ctu13 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_cnn_lstm.py --dataset ctu13 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_gru.py      --dataset ctu13 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
+python train_cnn_gru.py  --dataset ctu13 --augment wcgan_gp --max_normal 500000 --max_mismatch 2
 
 python evaluate.py --dataset cicids2017 --augment wcgan_gp
 python evaluate.py --dataset cicids2018 --augment wcgan_gp
