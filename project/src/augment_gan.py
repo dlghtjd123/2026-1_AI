@@ -58,7 +58,7 @@ N_EPOCHS     = 500
 BATCH_SIZE   = 64
 LR_G         = 2e-4
 LR_D         = 2e-4
-TARGET_RATIO = 0.005
+TARGET_RATIO = 0.1
 RANDOM_STATE = 42
 MIN_SEG_SIZE = 30
 

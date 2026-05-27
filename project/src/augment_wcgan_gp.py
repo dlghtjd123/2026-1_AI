@@ -61,7 +61,7 @@ LR_G         = 1e-4
 LR_D         = 1e-4
 N_CRITIC     = 5
 LAMBDA_GP    = 10
-TARGET_RATIO = 0.005
+TARGET_RATIO = 0.1
 RANDOM_STATE = 42
 MIN_SEG_SIZE = 30
 

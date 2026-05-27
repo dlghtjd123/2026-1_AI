@@ -128,7 +128,19 @@ COLUMN_MAP: dict[str, str] = {
 def load_raw(file_path):
     print(f"[LOAD] {file_path}")
     chunks = []
+    keep_cols = list(dict.fromkeys(["Label"] + ML_FEATURES))
     for chunk in pd.read_csv(file_path, chunksize=200_000, low_memory=False):
+        chunk.columns = chunk.columns.str.strip()
+        chunk = fix_duplicate_columns(chunk)
+        rename = {k: v for k, v in COLUMN_MAP.items() if k in chunk.columns}
+        chunk.rename(columns=rename, inplace=True)
+        label_col = next((c for c in chunk.columns if c.lower() == "label"), None)
+        present_cols = [col for col in keep_cols if col in chunk.columns]
+        if label_col and label_col not in present_cols:
+            present_cols.insert(0, label_col)
+        chunk = chunk.loc[:, present_cols]
+        for col in [c for c in ML_FEATURES if c in chunk.columns]:
+            chunk[col] = pd.to_numeric(chunk[col], errors="coerce").astype(np.float32)
         chunks.append(chunk)
     df = pd.concat(chunks, ignore_index=True)
     df.columns = df.columns.str.strip()
@@ -193,7 +205,7 @@ def clean_numeric_features(df):
     if missing:
         raise ValueError(f"필수 컬럼 {len(missing)}개 누락: {missing}")
     for col in ML_FEATURES:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype(np.float32)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df[ML_FEATURES] = df[ML_FEATURES].fillna(0)
     return df
@@ -239,11 +251,14 @@ def apply_scaler(X_trainval, X_test):
     if not SCALER_PATH.exists():
         raise FileNotFoundError(f"CIC2017 scaler 없음: {SCALER_PATH}\n먼저 preprocess_cicids2017.py 실행")
     cic_scaler   = joblib.load(SCALER_PATH)
-    X_tv_scaled  = cic_scaler.transform(X_trainval).astype(np.float32)
-    X_te_scaled  = cic_scaler.transform(X_test).astype(np.float32)
-    aligner      = MinMaxScaler()
-    X_tv_aligned = aligner.fit_transform(X_tv_scaled).astype(np.float32)
-    X_te_aligned = aligner.transform(X_te_scaled).astype(np.float32)
+    cic_scaler.copy = False
+    X_trainval = np.ascontiguousarray(X_trainval, dtype=np.float32)
+    X_test = np.ascontiguousarray(X_test, dtype=np.float32)
+    X_tv_scaled  = cic_scaler.transform(X_trainval)
+    X_te_scaled  = cic_scaler.transform(X_test)
+    aligner      = MinMaxScaler(copy=False)
+    X_tv_aligned = aligner.fit_transform(X_tv_scaled)
+    X_te_aligned = aligner.transform(X_te_scaled)
     joblib.dump(aligner, SAVE_ROOT / "aligner.pkl")
     print(f"[SCALER] CIC2017 MinMaxScaler + Secondary MinMaxScaler 적용 완료")
     return X_tv_aligned, X_te_aligned
@@ -326,6 +341,7 @@ def main():
     df_trainval, df_test = split_random(df)
     X_tv, y_tv = create_flow_data(df_trainval)
     X_te, y_te = create_flow_data(df_test)
+    del df, df_trainval, df_test
 
     # ① CIC2017 Scaler + ② Secondary Scaler
     X_tv, X_te = apply_scaler(X_tv, X_te)

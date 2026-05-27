@@ -130,6 +130,7 @@ def load_all_csv(raw_dir):
         raise FileNotFoundError(f"CSV 파일을 찾을 수 없습니다: {raw_dir}")
     print(f"[LOAD] CSV 파일 수: {len(csv_files)}")
     df_list = []
+    keep_cols = list(dict.fromkeys(REQUIRED_BASE_COLS + ML_FEATURES))
     for file_path in csv_files:
         print(f"[LOAD] {os.path.basename(file_path)}")
         temp_df = None
@@ -141,6 +142,11 @@ def load_all_csv(raw_dir):
                 continue
         if temp_df is None:
             raise ValueError(f"파일 로드 실패: {os.path.basename(file_path)}")
+        temp_df = normalize_column_names(temp_df)
+        present_cols = [col for col in keep_cols if col in temp_df.columns]
+        temp_df = temp_df.loc[:, present_cols]
+        for col in [c for c in ML_FEATURES if c in temp_df.columns]:
+            temp_df[col] = pd.to_numeric(temp_df[col], errors="coerce").astype(np.float32)
         df_list.append(temp_df)
     df = pd.concat(df_list, ignore_index=True)
     print(f"[LOAD] 병합 후 shape: {df.shape}")
@@ -158,12 +164,14 @@ def validate_columns(df):
 def basic_cleaning(df):
     before_rows = len(df)
     df = df.dropna(subset=["Label", "Source IP"])
-    df = df[(df["Label"].astype(str).str.strip() != "") & (df["Source IP"].astype(str).str.strip() != "")]
+    valid_mask = (df["Label"].astype(str).str.strip() != "") & (df["Source IP"].astype(str).str.strip() != "")
+    if not valid_mask.all():
+        df = df.loc[valid_mask]
     for col in df.select_dtypes(include=["object"]).columns:
         df[col] = df[col].astype(str).str.strip()
     for col in [c for c in ML_FEATURES if c in df.columns]:
         if df[col].dtype == object:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(np.float32)
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce", dayfirst=True, format="mixed")
     df = df.dropna(subset=["Timestamp"])
     df = df.replace([np.inf, -np.inf], np.nan)

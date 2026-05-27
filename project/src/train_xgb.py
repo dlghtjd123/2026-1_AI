@@ -130,11 +130,6 @@ def main():
             from augment_utils import subsample_benign
             X_train, y_train = subsample_benign(X_train, y_train, TARGET_BOT_RATIO)
 
-        # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if TARGET_BOT_RATIO > 0:
-            from augment_utils import subsample_benign
-            X_train, y_train = subsample_benign(X_train, y_train, TARGET_BOT_RATIO)
-
         X_train, y_train = augment_train_fold(
             X_train, y_train, AUGMENT, DATASET, DATA_ROOT
         )
@@ -158,7 +153,7 @@ def main():
             scale_pos_weight=scale_pos_weight,
             early_stopping_rounds=50,
             tree_method="hist",
-            device="cuda",
+            device="cpu",
         )
         model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Content \"c:\\\\Users\\\\amg85\\\\Desktop\\\\2026-1_AI\\\\project\\\\data\\\\raw\\\\ctu-13\\\\scenario9_raw.csv\" -TotalCount 1 | ForEach-Object { $_.Split\\(','\\) | ForEach-Object { $_.Trim\\(\\) } })"
+    ]
+  }
+}

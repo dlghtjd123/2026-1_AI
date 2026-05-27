@@ -264,7 +264,7 @@ def main():
     print(f"[CONFIG] augment          : {AUGMENT}")
     print(f"[CONFIG] n_folds          : {N_FOLDS}")
     print(f"[CONFIG] target_bot_ratio : {TARGET_BOT_RATIO} "
-          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'}")
+          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.0f}:{TARGET_BOT_RATIO*100:.0f}'})")
     print(f"[CONFIG] data             : {DATA_DIR}")
     print(f"[INFO]   device           : {device}")
 
@@ -291,15 +291,6 @@ def main():
         print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
         X_train, X_val = X_all[train_idx], X_all[val_idx]
         y_train, y_val = y_all[train_idx], y_all[val_idx]
-
-        # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if TARGET_BOT_RATIO > 0:
-            from augment_utils import subsample_benign
-            n_f = X_train.shape[1]
-            X_train_flat, y_train = subsample_benign(
-                X_train.reshape(len(X_train), -1), y_train, TARGET_BOT_RATIO
-            )
-            X_train = X_train_flat.reshape(-1, n_f, 1)
 
         # train fold에만 subsample 적용 — val은 원본 분포 유지
         if TARGET_BOT_RATIO > 0:
