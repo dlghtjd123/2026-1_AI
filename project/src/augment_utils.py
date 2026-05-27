@@ -26,7 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
-TARGET_RATIO = 0.1   # SMOTE/GAN/WCGAN-GP 공통 증강 비율 (공정 비교)
+TARGET_RATIO = 0.1   # 하위 호환용 (내부에서 직접 사용 안 함)
+AUGMENT_MULTIPLIER = 2.0  # 증강 후 봇넷 수 = 원본 봇넷 × AUGMENT_MULTIPLIER
 
 
 # =========================================================
@@ -35,29 +36,41 @@ TARGET_RATIO = 0.1   # SMOTE/GAN/WCGAN-GP 공통 증강 비율 (공정 비교)
 def subsample_benign(
     X: np.ndarray,
     y: np.ndarray,
-    target_bot_ratio: float = 0.05,
+    max_normal: int = 0,
+    max_mismatch: float = 10.0,
     random_state: int = 42,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    봇넷 샘플 전부 유지, Benign만 줄여서 target_bot_ratio 달성.
+    봇넷 샘플 전부 유지, Benign만 줄여서 학습 속도 향상.
     test set은 절대 건드리지 말 것 — trainval에만 적용.
 
     Args:
-        target_bot_ratio: 목표 봇넷 비율 (0.05 = 95:5, 0.10 = 90:10)
+        max_normal:    정상 샘플 최대 개수 (0=제한 없음, 상한 cap 역할)
+        max_mismatch:  train 봇넷 비율이 원본 비율의 최대 N배까지 허용
+                       (기본값: 10 → 모든 데이터셋에 일관 적용)
 
-    추천 비율:
-        0.05 (95:5)  → 매우 좋음
-        0.10 (90:10) → 좋음
-        0.20 (80:20) → 가능
+    계산 방식:
+        원본 봇넷 비율 × max_mismatch = 허용 최대 train 봇넷 비율
+        → 해당 비율을 넘지 않는 정상 샘플 수 계산
+        → max_normal이 설정된 경우 둘 중 작은 값 적용
     """
-    bot_idx = np.where(y == 1)[0]
-    nor_idx = np.where(y == 0)[0]
-    n_bot   = len(bot_idx)
+    bot_idx   = np.where(y == 1)[0]
+    nor_idx   = np.where(y == 0)[0]
+    n_bot     = len(bot_idx)
+    orig_ratio = n_bot / len(y)   # 원본 봇넷 비율 (val 비율 근사)
 
-    n_normal_target = int(n_bot * (1 - target_bot_ratio) / target_bot_ratio)
+    # mismatch cap 기준 최대 정상 수 계산
+    max_ratio = min(orig_ratio * max_mismatch, 0.5)
+    n_normal_by_mismatch = int(n_bot * (1 - max_ratio) / max_ratio)
+
+    # max_normal이 설정된 경우 둘 중 작은 값 (더 엄격한 제한)
+    if max_normal > 0:
+        n_normal_target = min(max_normal, n_normal_by_mismatch)
+    else:
+        n_normal_target = n_normal_by_mismatch
 
     if len(nor_idx) <= n_normal_target:
-        print(f"  [SUBSAMPLE] Benign {len(nor_idx):,}개 < 목표 {n_normal_target:,} → 전체 사용")
+        print(f"  [SUBSAMPLE] Benign {len(nor_idx):,}개 ≤ 목표 {n_normal_target:,} → 전체 사용")
         return X, y
 
     rng            = np.random.RandomState(random_state)
@@ -67,7 +80,7 @@ def subsample_benign(
     X_sub, y_sub = X[keep], y[keep]
     print(f"  [SUBSAMPLE] Benign {len(nor_idx):,} → {n_normal_target:,}개  "
           f"(Bot {n_bot:,} 전부 유지)  "
-          f"비율={y_sub.mean():.4f}  총={len(y_sub):,}개")
+          f"비율={y_sub.mean():.4f}  mismatch≤{max_mismatch:.0f}x  총={len(y_sub):,}개")
     return X_sub, y_sub
 
 
@@ -77,12 +90,11 @@ def subsample_benign(
 def _smote(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     from imblearn.over_sampling import SMOTE
 
-    n_majority = int((y == 0).sum())
     n_current  = int(y.sum())
-    n_target   = int(n_majority * TARGET_RATIO / (1 - TARGET_RATIO))
+    n_target   = int(n_current * AUGMENT_MULTIPLIER)
 
     if n_target <= n_current:
-        print(f"    [AUG] SMOTE 불필요 (Bot={n_current:,} >= 목표 {n_target:,})")
+        print(f"    [AUG] SMOTE 불필요 (현재 Bot={n_current:,} >= 목표 {n_target:,})")
         return X, y
 
     smote = SMOTE(
@@ -164,14 +176,12 @@ def _gan_augment(
     n_features = ckpt["n_features"]
     label_dim  = ckpt.get("label_dim", 16)
 
-    # 생성 수 계산
-    n_majority = int((y == 0).sum())
     n_current  = int(y.sum())
-    n_target   = int(n_majority * TARGET_RATIO / (1 - TARGET_RATIO))
+    n_target   = int(n_current * AUGMENT_MULTIPLIER)
     n_generate = n_target - n_current
 
     if n_generate <= 0:
-        print(f"    [AUG] GAN 불필요 (Bot={n_current:,} >= 목표 {n_target:,})")
+        print(f"    [AUG] GAN 불필요 (현재 Bot={n_current:,} >= 목표 {n_target:,})")
         return X, y
 
     # ── 새 형식: 다중 세그먼트 Generator ────────────────────

@@ -37,13 +37,16 @@ _parser.add_argument("--dataset", type=str, default="cicids2017",
 _parser.add_argument("--n_folds", type=int, default=5)
 _parser.add_argument("--debug",   action="store_true",
                      help="디버그 모드: 원인 분석 로그 출력")
-_parser.add_argument("--target_bot_ratio", type=float, default=0.005,
-                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.005=99.5:0.5, 0=전체 사용)")
+_parser.add_argument("--max_normal", type=int, default=500_000,
+                     help="fold당 최대 정상 샘플 수 상한 (기본값: 500000, 0=제한 없음)")
+_parser.add_argument("--max_mismatch", type=float, default=10.0,
+                     help="train/val 봇넷 비율 최대 배수 (기본값: 10)")
 AUGMENT          = _parser.parse_args().augment
 DATASET          = _parser.parse_args().dataset
 N_FOLDS          = _parser.parse_args().n_folds
 DEBUG            = _parser.parse_args().debug
-TARGET_BOT_RATIO = _parser.parse_args().target_bot_ratio
+MAX_NORMAL   = _parser.parse_args().max_normal
+MAX_MISMATCH = _parser.parse_args().max_mismatch
 
 # Focal Loss alpha → pos_weight 등가값 (이중 보정 진단용)
 # alpha=0.75 → 봇넷 클래스가 정상 대비 0.75/0.25 = 3.0배 가중
@@ -282,8 +285,8 @@ def main():
     print(f"[CONFIG] augment : {AUGMENT}")
     print(f"[CONFIG] n_folds : {N_FOLDS}")
     print(f"[CONFIG] debug           : {DEBUG}")
-    print(f"[CONFIG] target_bot_ratio: {TARGET_BOT_RATIO} "
-          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.1f}:{TARGET_BOT_RATIO*100:.2f}'})")
+    print(f"[CONFIG] max_normal       : {MAX_NORMAL:,} (0=제한 없음)")
+    print(f"[CONFIG] max_mismatch     : {MAX_MISMATCH:.0f}x  (train/val 봇넷 비율 최대 배수)")
     print(f"[CONFIG] data    : {DATA_DIR}")
     print(f"[INFO]   device  : {device}")
     print(f"[INFO]   Focal Loss alpha={FOCAL_ALPHA}  "
@@ -317,11 +320,12 @@ def main():
         y_train_orig = y_train.copy()
 
         # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if TARGET_BOT_RATIO > 0:
+        if MAX_NORMAL > 0:
             from augment_utils import subsample_benign
             _nf = X_train.shape[1]
             X_train_f, y_train = subsample_benign(
-                X_train.reshape(len(X_train), -1), y_train, TARGET_BOT_RATIO
+                X_train.reshape(len(X_train), -1), y_train,
+                max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
             )
             X_train = X_train_f.reshape(-1, _nf, 1)
             y_train_orig = y_train.copy()  # subsample 후 orig 갱신

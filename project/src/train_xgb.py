@@ -19,6 +19,7 @@ from xgboost import XGBClassifier
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from augment_utils import augment_train_fold
+from debug_utils import debug_fold
 
 
 _parser = argparse.ArgumentParser()
@@ -27,12 +28,19 @@ _parser.add_argument("--augment", type=str, default="none",
 _parser.add_argument("--dataset", type=str, default="cicids2017",
                      choices=["cicids2017", "cicids2018", "ctu13"])
 _parser.add_argument("--n_folds", type=int, default=5)
-_parser.add_argument("--target_bot_ratio", type=float, default=0.005,
-                     help="Benign 축소 후 목표 봇넷 비율 (기본값: 0.005=99.5:0.5, 0=전체 사용)")
-AUGMENT          = _parser.parse_args().augment
-DATASET          = _parser.parse_args().dataset
-N_FOLDS          = _parser.parse_args().n_folds
-TARGET_BOT_RATIO = _parser.parse_args().target_bot_ratio
+_parser.add_argument("--debug", action="store_true",
+                     help="디버그 모드: 원인 분석 로그 출력 (--augment 사용 시 권장)")
+_parser.add_argument("--max_normal", type=int, default=500_000,
+                     help="fold당 최대 정상 샘플 수 상한 (기본값: 500000, 0=제한 없음)")
+_parser.add_argument("--max_mismatch", type=float, default=10.0,
+                     help="train/val 봇넷 비율 최대 배수 (기본값: 10)")
+_args = _parser.parse_args()
+AUGMENT      = _args.augment
+DATASET      = _args.dataset
+N_FOLDS      = _args.n_folds
+DEBUG        = _args.debug
+MAX_NORMAL   = _args.max_normal
+MAX_MISMATCH = _args.max_mismatch
 
 
 _SRC_DIR  = Path(__file__).resolve().parent
@@ -97,8 +105,9 @@ def main():
     print(f"[CONFIG] dataset          : {DATASET}")
     print(f"[CONFIG] augment          : {AUGMENT}")
     print(f"[CONFIG] n_folds          : {N_FOLDS}")
-    print(f"[CONFIG] target_bot_ratio : {TARGET_BOT_RATIO} "
-          f"({'전체 사용' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.1f}:{TARGET_BOT_RATIO*100:.2f}'})")
+    print(f"[CONFIG] debug            : {DEBUG}")
+    print(f"[CONFIG] max_normal       : {MAX_NORMAL:,} (0=제한 없음)")
+    print(f"[CONFIG] max_mismatch     : {MAX_MISMATCH:.0f}x  (train/val 봇넷 비율 최대 배수)")
     print(f"[CONFIG] data             : {DATA_DIR}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -125,11 +134,18 @@ def main():
         X_train, X_val = X_all[train_idx], X_all[val_idx]
         y_train, y_val = y_all[train_idx], y_all[val_idx]
 
-        # train fold에만 subsample 적용 — val은 원본 분포 유지
-        if TARGET_BOT_RATIO > 0:
-            from augment_utils import subsample_benign
-            X_train, y_train = subsample_benign(X_train, y_train, TARGET_BOT_RATIO)
+        # 증강 전 라벨 저장 (debug용)
+        y_train_orig = y_train.copy()
 
+        # train fold에만 subsample 적용 — val은 원본 분포 유지
+        if MAX_NORMAL > 0:
+            from augment_utils import subsample_benign
+            X_train, y_train = subsample_benign(
+                X_train, y_train, max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
+            )
+            y_train_orig = y_train.copy()  # subsample 후 orig 갱신
+
+        # train fold에만 증강 적용 — val fold는 항상 원본 유지
         X_train, y_train = augment_train_fold(
             X_train, y_train, AUGMENT, DATASET, DATA_ROOT
         )
@@ -173,6 +189,19 @@ def main():
               f"Precision={val_metrics['precision']:.4f} | "
               f"ROC-AUC={val_metrics.get('roc_auc', 0):.4f}")
 
+        # ── 디버그 출력 (--debug 플래그 또는 증강 시 자동) ──
+        if DEBUG or AUGMENT != "none":
+            debug_fold(
+                fold=fold,
+                y_val=y_val,
+                y_pred=y_pred,
+                y_prob=val_prob,
+                y_train_orig=y_train_orig,
+                y_train_aug=y_train if AUGMENT != "none" else None,
+                pos_weight=scale_pos_weight,
+                augment=AUGMENT,
+            )
+
         score = (val_metrics["f1"], val_metrics["recall"])
         if best_fold_score is None or score > best_fold_score:
             best_fold_score = score
@@ -189,9 +218,13 @@ def main():
         json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
 
     output = {
-        "dataset": DATASET, "augment": AUGMENT, "n_folds": N_FOLDS,
+        "dataset": DATASET, 
+        "augment": AUGMENT, 
+        "n_folds": N_FOLDS,
         "primary_metric": ["f1", "recall"],
-        "summary": summary, "fold_results": fold_results, "best_fold": best_fold_idx,
+        "summary": summary, 
+        "fold_results": fold_results, 
+        "best_fold": best_fold_idx,
     }
     with open(RESULT_DIR / "xgb_flow_kfold_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)

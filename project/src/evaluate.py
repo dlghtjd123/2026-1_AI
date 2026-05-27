@@ -39,11 +39,11 @@ _parser.add_argument("--dataset", type=str, default="cicids2017",
                      choices=["cicids2017", "cicids2018", "ctu13"])
 _parser.add_argument("--augment", type=str, default="none",
                      choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"])
-_parser.add_argument("--target_bot_ratio", type=float, default=0.05,
-                     help="학습 시 사용한 봇넷 비율 (정보 표시용, test는 항상 원본 유지)")
+_parser.add_argument("--bot_ratio_factor", type=float, default=10.0,
+                     help="학습 시 사용한 봇넷 비율 배수 (정보 표시용)")
 DATASET          = _parser.parse_args().dataset
 AUGMENT          = _parser.parse_args().augment
-TARGET_BOT_RATIO = _parser.parse_args().target_bot_ratio
+BOT_RATIO_FACTOR = _parser.parse_args().bot_ratio_factor
 
 
 # =========================================================
@@ -353,8 +353,8 @@ def main():
     print("=" * 72)
     print(f"  MODEL_DIR        = {MODEL_DIR}")
     print(f"  RESULT_DIR       = {RESULT_DIR}")
-    print(f"  학습 bot 비율    = {TARGET_BOT_RATIO} "
-          f"({'전체' if TARGET_BOT_RATIO == 0 else f'{(1-TARGET_BOT_RATIO)*100:.1f}:{TARGET_BOT_RATIO*100:.2f}'})")
+    print(f"  학습 bot 비율    = 원본 × {BOT_RATIO_FACTOR:.0f}배 "
+          f"({BOT_RATIO_FACTOR:.0f}x 배수)")
     print(f"  test set         = 원본 유지 (subsample 없음)")
     print(f"  ★ 주 지표 = F1-score, Recall  /  보조: ROC-AUC")
     print("=" * 72)
