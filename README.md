@@ -86,7 +86,9 @@ python preprocess_ctu13.py
 전체 실험은 [run_experiments.py](project/src/run_experiments.py)로 자동 실행할 수 있다.
 
 ```bash
-python project/src/run_experiments.py --datasets cicids2017 --augments none smote gan wcgan_gp
+python run_experiments.py --datasets cicids2017 --augments none smote gan wcgan_gp --max_mismatch 5~10
+python run_experiments.py --datasets cicids2018 --augments none smote gan wcgan_gp --max_mismatch 2
+python run_experiments.py --datasets ctu13 --augments none smote gan wcgan_gp --max_mismatch 2
 ```
 
 세 데이터셋 전체 실행:
