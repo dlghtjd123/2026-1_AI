@@ -55,7 +55,7 @@ SAVE_ROOT = _PROJECT / "data" / "processed" / f"{DATASET}_wcgan_gp"
 # =========================================================
 NOISE_DIM    = 100
 LABEL_DIM    = 16
-N_EPOCHS     = 1000
+N_EPOCHS     = 500
 BATCH_SIZE   = 64
 LR_G         = 1e-4
 LR_D         = 1e-4

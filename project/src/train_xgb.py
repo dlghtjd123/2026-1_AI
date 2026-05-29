@@ -20,6 +20,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from augment_utils import augment_train_fold
 from debug_utils import debug_fold
+from threshold_utils import select_threshold, threshold_label
 
 
 _parser = argparse.ArgumentParser()
@@ -32,15 +33,21 @@ _parser.add_argument("--debug", action="store_true",
                      help="디버그 모드: 원인 분석 로그 출력 (--augment 사용 시 권장)")
 _parser.add_argument("--max_normal", type=int, default=500_000,
                      help="fold당 최대 정상 샘플 수 상한 (기본값: 500000, 0=제한 없음)")
-_parser.add_argument("--max_mismatch", type=float, default=10.0,
-                     help="train/val 봇넷 비율 최대 배수 (기본값: 10)")
+_parser.add_argument("--max_mismatch", type=float, default=None,
+                     help="train/val 봇넷 비율 최대 배수 (기본값: cicids2017=5, cicids2018/ctu13=2)")
+_parser.add_argument("--threshold_mode", type=str, default="fixed",
+                     choices=["fixed", "f1_opt"],
+                     help="fixed=0.5, f1_opt=validation F1 기준 threshold 선택")
 _args = _parser.parse_args()
 AUGMENT      = _args.augment
 DATASET      = _args.dataset
 N_FOLDS      = _args.n_folds
 DEBUG        = _args.debug
 MAX_NORMAL   = _args.max_normal
-MAX_MISMATCH = _args.max_mismatch
+MAX_MISMATCH = _args.max_mismatch if _args.max_mismatch is not None else (
+    5.0 if DATASET == "cicids2017" else 2.0
+)
+THRESHOLD_MODE = _args.threshold_mode
 
 
 _SRC_DIR  = Path(__file__).resolve().parent
@@ -148,6 +155,7 @@ def main():
     print(f"[CONFIG] debug            : {DEBUG}")
     print(f"[CONFIG] max_normal       : {MAX_NORMAL:,} (0=제한 없음)")
     print(f"[CONFIG] max_mismatch     : {MAX_MISMATCH:.0f}x  (train/val 봇넷 비율 최대 배수)")
+    print(f"[CONFIG] threshold_mode   : {THRESHOLD_MODE}")
     print(f"[CONFIG] data             : {DATA_DIR}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -168,6 +176,7 @@ def main():
     best_fold_thr   = 0.5
     best_fold_idx   = -1
     best_n_estimators = 1000
+    fold_thresholds = []
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(X_all, y_all), 1):
         print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
@@ -186,14 +195,16 @@ def main():
         model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
         val_prob    = model.predict_proba(X_val)[:, 1]
-        y_pred      = (val_prob >= 0.5).astype(int)
+        thr         = select_threshold(y_val, val_prob, THRESHOLD_MODE)
+        y_pred      = (val_prob >= thr).astype(int)
         val_metrics = compute_metrics(y_val, y_pred, val_prob)
-        val_metrics["selected_threshold"] = 0.5
+        val_metrics["selected_threshold"] = thr
         val_metrics["fold"]               = fold
-        val_metrics["threshold"]          = 0.5
+        val_metrics["threshold"]          = thr
         fold_results.append(val_metrics)
+        fold_thresholds.append(thr)
 
-        print(f"  thr=0.50 | F1={val_metrics['f1']:.4f} | "
+        print(f"  thr={thr:.4f} | F1={val_metrics['f1']:.4f} | "
               f"Recall={val_metrics['recall']:.4f} | "
               f"Precision={val_metrics['precision']:.4f} | "
               f"ROC-AUC={val_metrics.get('roc_auc', 0):.4f}")
@@ -215,13 +226,18 @@ def main():
         if best_fold_score is None or score > best_fold_score:
             best_fold_score = score
             best_fold_model = model
-            best_fold_thr   = 0.5
+            best_fold_thr   = thr
             best_fold_idx   = fold
             best_iter = getattr(model, "best_iteration", None)
             best_n_estimators = int(best_iter + 1) if best_iter is not None else 1000
 
     summary = print_fold_summary(fold_results)
     print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
+    final_threshold = (
+        float(np.mean(fold_thresholds)) if THRESHOLD_MODE == "f1_opt"
+        else best_fold_thr
+    )
+    print(f"[INFO] Final threshold: {threshold_label(final_threshold, THRESHOLD_MODE)}")
 
     print("\n[FINAL] trainval 전체로 최종 XGBoost 모델 재학습")
     X_final, y_final, _ = prepare_train_data(X_all, y_all, fold_id="final")
@@ -239,7 +255,10 @@ def main():
 
     with open(MODEL_DIR / "xgb_flow_threshold.json", "w", encoding="utf-8") as f:
         json.dump({
-            "threshold": best_fold_thr,
+            "threshold": final_threshold,
+            "threshold_mode": THRESHOLD_MODE,
+            "best_fold_threshold": best_fold_thr,
+            "fold_thresholds": fold_thresholds,
             "best_fold": best_fold_idx,
             "best_n_estimators": best_n_estimators,
             "saved_model": "final_trainval_refit",
@@ -254,6 +273,9 @@ def main():
         "fold_results": fold_results, 
         "best_fold": best_fold_idx,
         "best_n_estimators": best_n_estimators,
+        "threshold_mode": THRESHOLD_MODE,
+        "final_threshold": final_threshold,
+        "fold_thresholds": fold_thresholds,
         "saved_model": "final_trainval_refit",
     }
     with open(RESULT_DIR / "xgb_flow_kfold_results.json", "w", encoding="utf-8") as f:

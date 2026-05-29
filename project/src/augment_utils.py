@@ -30,7 +30,7 @@ import numpy as np
 TARGET_RATIO = 0.1   # 하위 호환용 (내부에서 직접 사용 안 함)
 AUGMENT_MULTIPLIER = 2.0  # 증강 후 봇넷 수 = 원본 봇넷 × AUGMENT_MULTIPLIER
 GAN_EPOCHS = int(os.environ.get("FOLD_GAN_EPOCHS", "500"))
-WCGAN_EPOCHS = int(os.environ.get("FOLD_WCGAN_EPOCHS", "1000"))
+WCGAN_EPOCHS = int(os.environ.get("FOLD_WCGAN_EPOCHS", "500"))
 GAN_BATCH_SIZE = 64
 GAN_NOISE_DIM = 100
 WCGAN_LABEL_DIM = 16

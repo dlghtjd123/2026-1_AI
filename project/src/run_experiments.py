@@ -11,6 +11,7 @@ run_experiments.py
 예시:
   python run_experiments.py --datasets cicids2017 --augments none smote
   python run_experiments.py --datasets cicids2017 --augments gan --fold_gan_epochs 100
+  python run_experiments.py --datasets cicids2017 --augments smote --threshold_mode f1_opt
   python run_experiments.py --dry_run
 """
 
@@ -45,7 +46,11 @@ def parse_args():
                         choices=list(TRAIN_SCRIPTS.keys()))
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--max_normal", type=int, default=500_000)
-    parser.add_argument("--max_mismatch", type=float, default=10.0)
+    parser.add_argument("--max_mismatch", type=float, default=None,
+                        help="기본값: cicids2017=5, cicids2018/ctu13=2")
+    parser.add_argument("--threshold_mode", type=str, default="fixed",
+                        choices=["fixed", "f1_opt"],
+                        help="fixed=0.5 기준, f1_opt=fold validation F1 기준 threshold 선택")
     parser.add_argument("--fold_gan_epochs", type=int, default=None,
                         help="fold-local GAN epoch override")
     parser.add_argument("--fold_wcgan_epochs", type=int, default=None,
@@ -92,7 +97,16 @@ def run_command(cmd: list[str], cwd: Path, env: dict[str, str], dry_run: bool) -
     }
 
 
+def resolve_max_mismatch(dataset: str, args) -> float:
+    if args.max_mismatch is not None:
+        return float(args.max_mismatch)
+    if dataset == "cicids2017":
+        return 5.0
+    return 2.0
+
+
 def train_command(src_dir: Path, script: str, dataset: str, augment: str, args) -> list[str]:
+    max_mismatch = resolve_max_mismatch(dataset, args)
     cmd = [
         sys.executable,
         str(src_dir / script),
@@ -100,7 +114,8 @@ def train_command(src_dir: Path, script: str, dataset: str, augment: str, args) 
         "--augment", augment,
         "--n_folds", str(args.n_folds),
         "--max_normal", str(args.max_normal),
-        "--max_mismatch", str(args.max_mismatch),
+        "--max_mismatch", str(max_mismatch),
+        "--threshold_mode", args.threshold_mode,
     ]
     if args.debug:
         cmd.append("--debug")
@@ -143,9 +158,10 @@ def main():
     print(f"  models           : {args.models}")
     print(f"  n_folds          : {args.n_folds}")
     print(f"  max_normal       : {args.max_normal}")
-    print(f"  max_mismatch     : {args.max_mismatch}")
+    print(f"  max_mismatch     : {args.max_mismatch if args.max_mismatch is not None else 'dataset default (cicids2017=5, cicids2018/ctu13=2)'}")
+    print(f"  threshold_mode   : {args.threshold_mode}")
     print(f"  FOLD_GAN_EPOCHS  : {env.get('FOLD_GAN_EPOCHS', '500')}")
-    print(f"  FOLD_WCGAN_EPOCHS: {env.get('FOLD_WCGAN_EPOCHS', '1000')}")
+    print(f"  FOLD_WCGAN_EPOCHS: {env.get('FOLD_WCGAN_EPOCHS', '500')}")
     print(f"  dry_run          : {args.dry_run}")
     print(f"  log              : {log_path}")
     print("=" * 72)

@@ -86,9 +86,18 @@ python preprocess_ctu13.py
 전체 실험은 [run_experiments.py](project/src/run_experiments.py)로 자동 실행할 수 있다.
 
 ```bash
-python run_experiments.py --datasets cicids2017 --augments none smote gan wcgan_gp --max_mismatch 5~10
-python run_experiments.py --datasets cicids2018 --augments none smote gan wcgan_gp --max_mismatch 2
-python run_experiments.py --datasets ctu13 --augments none smote gan wcgan_gp --max_mismatch 2
+python project/src/run_experiments.py --datasets cicids2017 --augments none smote gan wcgan_gp
+python project/src/run_experiments.py --datasets cicids2018 --augments none smote gan wcgan_gp
+python project/src/run_experiments.py --datasets ctu13 --augments none smote gan wcgan_gp
+```
+
+validation F1 기준으로 threshold를 최적화해서 실행:
+
+```bash
+python project/src/run_experiments.py \
+  --datasets cicids2017 \
+  --augments none smote gan wcgan_gp \
+  --threshold_mode f1_opt
 ```
 
 세 데이터셋 전체 실행:
@@ -140,6 +149,13 @@ python train_gru.py      --dataset cicids2017 --augment none
 python train_cnn_gru.py  --dataset cicids2017 --augment none
 
 python evaluate.py --dataset cicids2017 --augment none
+```
+
+threshold 최적화 옵션을 개별 학습에 적용:
+
+```bash
+python train_cnn_lstm.py --dataset cicids2017 --augment smote --threshold_mode f1_opt
+python evaluate.py --dataset cicids2017 --augment smote
 ```
 
 ### SMOTE
@@ -219,7 +235,7 @@ GAN/WCGAN-GP Generator epoch는 별도 설정이다.
 | 항목 | 기본값 |
 |------|--------|
 | `FOLD_GAN_EPOCHS` | 500 |
-| `FOLD_WCGAN_EPOCHS` | 1000 |
+| `FOLD_WCGAN_EPOCHS` | 500 |
 
 자동화 스크립트에서 변경:
 
@@ -250,7 +266,7 @@ Botnet 샘플은 제거하지 않는다.
 | 인자 | 의미 | 기본값 |
 |------|------|--------|
 | `--max_normal` | fold당 최대 Benign 샘플 수 | `500000` |
-| `--max_mismatch` | train Botnet 비율이 원본보다 커질 수 있는 최대 배수 | `10.0` |
+| `--max_mismatch` | train Botnet 비율이 원본보다 커질 수 있는 최대 배수 | `cicids2017=5.0`, `cicids2018=2.0`, `ctu13=2.0` |
 
 동작:
 
@@ -318,6 +334,20 @@ Final evaluation:
 | Precision | 보조 지표 |
 | ROC-AUC | 보조 지표 |
 | Accuracy | 참고 지표 |
+
+### Threshold 설정
+
+기본값은 기존 논문들과 비교하기 쉬운 `fixed` 모드이다.
+
+| 모드 | 의미 | 사용 목적 |
+|------|------|----------|
+| `fixed` | threshold 0.5 고정 | 기본 비교 실험 |
+| `f1_opt` | 각 fold validation set에서 F1이 최대가 되는 threshold 선택 | threshold 민감도 / 추가 분석 |
+
+`f1_opt`는 test set을 보지 않고 validation fold에서만 threshold를 선택한다.  
+최종 holdout test 평가에는 fold별 최적 threshold의 평균값을 사용한다.
+
+논문 본문에서는 `fixed` 결과를 주 결과로 두고, `f1_opt` 결과는 threshold 보정 후 성능 변화 또는 추가 실험으로 분리해 보고하는 것을 권장한다.
 
 ---
 
@@ -420,12 +450,14 @@ artifacts/results_{dataset}_{augment}/eval_results.json
 | `train_*.py` | `--n_folds` | K-Fold 수, 기본값 5 |
 | `train_*.py` | `--debug` | 디버그 로그 출력 |
 | `train_*.py` | `--max_normal` | 최대 Benign 수 |
-| `train_*.py` | `--max_mismatch` | Botnet 비율 증가 제한 |
+| `train_*.py` | `--max_mismatch` | Botnet 비율 증가 제한, 기본값은 `cicids2017=5`, `cicids2018=2`, `ctu13=2` |
+| `train_*.py` | `--threshold_mode` | `fixed`, `f1_opt` |
 | `evaluate.py` | `--dataset` | 평가 데이터셋 |
 | `evaluate.py` | `--augment` | 평가할 증강 설정 |
 | `run_experiments.py` | `--datasets` | 여러 데이터셋 자동 실행 |
 | `run_experiments.py` | `--augments` | 여러 증강 방식 자동 실행 |
 | `run_experiments.py` | `--models` | 실행할 모델 선택 |
+| `run_experiments.py` | `--threshold_mode` | 전체 학습에 threshold 모드 적용 |
 | `run_experiments.py` | `--dry_run` | 명령만 출력 |
 | `run_experiments.py` | `--fold_gan_epochs` | fold-local GAN epoch |
 | `run_experiments.py` | `--fold_wcgan_epochs` | fold-local WCGAN-GP epoch |

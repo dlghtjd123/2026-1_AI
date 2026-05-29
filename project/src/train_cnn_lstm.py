@@ -24,6 +24,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from augment_utils import augment_train_fold
 from debug_utils import debug_fold
+from threshold_utils import select_threshold, threshold_label
 
 
 # =========================================================
@@ -39,15 +40,21 @@ _parser.add_argument("--debug",   action="store_true",
                      help="디버그 모드: 원인 분석 로그 출력")
 _parser.add_argument("--max_normal", type=int, default=500_000,
                      help="fold당 최대 정상 샘플 수 상한 (기본값: 500000, 0=제한 없음)")
-_parser.add_argument("--max_mismatch", type=float, default=10.0,
-                     help="train/val 봇넷 비율 최대 배수 (기본값: 10)")
+_parser.add_argument("--max_mismatch", type=float, default=None,
+                     help="train/val 봇넷 비율 최대 배수 (기본값: cicids2017=5, cicids2018/ctu13=2)")
+_parser.add_argument("--threshold_mode", type=str, default="fixed",
+                     choices=["fixed", "f1_opt"],
+                     help="fixed=0.5/argmax, f1_opt=validation F1 기준 threshold 선택")
 _args = _parser.parse_args()
 AUGMENT      = _args.augment
 DATASET      = _args.dataset
 N_FOLDS      = _args.n_folds
 DEBUG        = _args.debug
 MAX_NORMAL   = _args.max_normal
-MAX_MISMATCH = _args.max_mismatch
+MAX_MISMATCH = _args.max_mismatch if _args.max_mismatch is not None else (
+    5.0 if DATASET == "cicids2017" else 2.0
+)
+THRESHOLD_MODE = _args.threshold_mode
 
 # Focal Loss alpha → pos_weight 등가값 (이중 보정 진단용)
 # alpha=0.75 → 봇넷 클래스가 정상 대비 0.75/0.25 = 3.0배 가중
@@ -190,7 +197,7 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold, criterion=None)
     min_epochs       = 20
     best_score       = None
     best_state       = None
-    best_threshold   = "argmax"
+    best_threshold   = 0.5
     best_epoch       = 0
     best_val_metrics = None
     best_val_prob    = None       # debug용 저장
@@ -212,9 +219,10 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold, criterion=None)
         val_loss, y_val_true, y_val_prob = collect_probs_and_loss(
             model, val_loader, device, criterion
         )
-        y_pred              = (y_val_prob >= 0.5).astype(int)
+        threshold           = select_threshold(y_val_true, y_val_prob, THRESHOLD_MODE)
+        y_pred              = (y_val_prob >= threshold).astype(int)
         current_val_metrics = compute_metrics(y_val_true, y_pred, y_val_prob)
-        current_val_metrics["selected_threshold"] = "argmax"
+        current_val_metrics["selected_threshold"] = threshold
 
         current_score = (
             current_val_metrics["f1"],
@@ -227,14 +235,14 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold, criterion=None)
         print(
             f"  [Fold {fold} Epoch {epoch:02d}] "
             f"train={train_loss:.4f} | val={val_loss:.4f} | "
-            f"argmax | f1={current_val_metrics['f1']:.4f} | "
+            f"thr={threshold:.4f} | f1={current_val_metrics['f1']:.4f} | "
             f"recall={current_val_metrics['recall']:.4f}"
         )
 
         if best_score is None or current_score > best_score:
             best_score       = current_score
             best_state       = copy.deepcopy(model.state_dict())
-            best_threshold   = "argmax"
+            best_threshold   = threshold
             best_epoch       = epoch
             best_val_metrics = current_val_metrics
             best_val_prob    = y_val_prob.copy()   # debug용
@@ -332,6 +340,7 @@ def main():
     print(f"[CONFIG] debug           : {DEBUG}")
     print(f"[CONFIG] max_normal       : {MAX_NORMAL:,} (0=제한 없음)")
     print(f"[CONFIG] max_mismatch     : {MAX_MISMATCH:.0f}x  (train/val 봇넷 비율 최대 배수)")
+    print(f"[CONFIG] threshold_mode   : {THRESHOLD_MODE}")
     print(f"[CONFIG] data    : {DATA_DIR}")
     print(f"[INFO]   device  : {device}")
     print(f"[INFO]   Focal Loss alpha={FOCAL_ALPHA}  "
@@ -352,10 +361,11 @@ def main():
     fold_results    = []
     best_fold_score = None
     best_fold_model = None
-    best_fold_thr   = "argmax"
+    best_fold_thr   = 0.5
     best_fold_idx   = -1
     best_n_features = X_all.shape[2]
     best_epoch       = 30
+    fold_thresholds  = []
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(X_all, y_all), 1):
         print(f"\n[Fold {fold}/{N_FOLDS}] train={len(train_idx):,}  val={len(val_idx):,}")
@@ -372,6 +382,7 @@ def main():
         )
         metrics["fold"] = fold
         fold_results.append(metrics)
+        fold_thresholds.append(float(thr))
 
         print(
             f"  → F1={metrics['f1']:.4f} | "
@@ -382,7 +393,7 @@ def main():
 
         # ── 디버그 출력 (--debug 또는 증강 시 자동) ──────────
         if DEBUG or AUGMENT != "none":
-            y_pred = (val_prob >= 0.5).astype(int)
+            y_pred = (val_prob >= float(thr)).astype(int)
             debug_fold(
                 fold=fold,
                 y_val=y_val,
@@ -406,6 +417,11 @@ def main():
 
     summary = print_fold_summary(fold_results)
     print(f"\n[INFO] Best fold: {best_fold_idx}  (F1={best_fold_score[0]:.4f})")
+    final_threshold = (
+        float(np.mean(fold_thresholds)) if THRESHOLD_MODE == "f1_opt"
+        else best_fold_thr
+    )
+    print(f"[INFO] Final threshold: {threshold_label(final_threshold, THRESHOLD_MODE)}")
 
     print("\n[FINAL] trainval 전체로 최종 CNN-LSTM 모델 재학습")
     X_final, y_final, _ = prepare_train_data(X_all, y_all, fold_id="final")
@@ -430,7 +446,10 @@ def main():
 
     with open(MODEL_DIR / "cnn_lstm_flow_threshold.json", "w", encoding="utf-8") as f:
         json.dump({
-            "threshold": best_fold_thr,
+            "threshold": final_threshold,
+            "threshold_mode": THRESHOLD_MODE,
+            "best_fold_threshold": best_fold_thr,
+            "fold_thresholds": fold_thresholds,
             "best_fold": best_fold_idx,
             "best_epoch": best_epoch,
             "saved_model": "final_trainval_refit",
@@ -445,6 +464,9 @@ def main():
         "fold_results":   fold_results,
         "best_fold":      best_fold_idx,
         "best_epoch":     best_epoch,
+        "threshold_mode": THRESHOLD_MODE,
+        "final_threshold": final_threshold,
+        "fold_thresholds": fold_thresholds,
         "saved_model":    "final_trainval_refit",
     }
     with open(RESULT_DIR / "cnn_lstm_flow_kfold_results.json", "w", encoding="utf-8") as f:
