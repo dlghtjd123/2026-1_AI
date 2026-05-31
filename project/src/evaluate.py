@@ -8,6 +8,7 @@ K-fold 학습 후 최종 holdout test set 평가
   python evaluate.py --dataset cicids2018
   python evaluate.py --dataset ctu13
   python evaluate.py --dataset cicids2017 --augment smote
+  python evaluate.py --dataset cicids2017 --augment smote --augment_multiplier 5
 """
 
 from __future__ import annotations
@@ -41,10 +42,13 @@ _parser.add_argument("--augment", type=str, default="none",
                      choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"])
 _parser.add_argument("--bot_ratio_factor", type=float, default=10.0,
                      help="학습 시 사용한 봇넷 비율 배수 (정보 표시용)")
+_parser.add_argument("--augment_multiplier", type=float, default=2.0,
+                     help="학습 시 사용한 증강 후 Bot 수 목표 배수 (기본값: 2)")
 _args = _parser.parse_args()
 DATASET          = _args.dataset
 AUGMENT          = _args.augment
 BOT_RATIO_FACTOR = _args.bot_ratio_factor
+AUGMENT_MULTIPLIER = _args.augment_multiplier
 
 
 # =========================================================
@@ -54,7 +58,8 @@ _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
 _ROOT     = _PROJECT.parent
 
-_MODEL_SUFFIX = f"_{AUGMENT}" if AUGMENT != "none" else ""
+_MUL_SUFFIX = "" if AUGMENT == "none" or AUGMENT_MULTIPLIER == 2.0 else f"_mul{AUGMENT_MULTIPLIER:g}"
+_MODEL_SUFFIX = f"_{AUGMENT}{_MUL_SUFFIX}" if AUGMENT != "none" else ""
 
 MODEL_DIR  = _ROOT / "artifacts" / f"models_{DATASET}{_MODEL_SUFFIX}"
 RESULT_DIR = _ROOT / "artifacts" / f"results_{DATASET}{_MODEL_SUFFIX}"
@@ -332,6 +337,7 @@ def save_results(results: dict) -> None:
     out = {
         "dataset":          DATASET,
         "augment":          AUGMENT,
+        "augment_multiplier": AUGMENT_MULTIPLIER,
         "primary_metric":   ["f1", "recall"],
         "secondary_metric": "roc_auc",
         "note":             "K-fold로 설정을 선택한 뒤 trainval 전체로 재학습한 최종 모델의 holdout test 평가",
@@ -356,6 +362,7 @@ def main():
     print(f"  RESULT_DIR       = {RESULT_DIR}")
     print(f"  학습 bot 비율    = 원본 × {BOT_RATIO_FACTOR:.0f}배 "
           f"({BOT_RATIO_FACTOR:.0f}x 배수)")
+    print(f"  증강 목표        = Bot × {AUGMENT_MULTIPLIER:g}")
     print(f"  test set         = 원본 유지 (subsample 없음)")
     print(f"  ★ 주 지표 = F1-score, Recall  /  보조: ROC-AUC")
     print("=" * 72)

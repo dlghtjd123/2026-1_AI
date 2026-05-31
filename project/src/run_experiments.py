@@ -12,6 +12,7 @@ run_experiments.py
   python run_experiments.py --datasets cicids2017 --augments none smote
   python run_experiments.py --datasets cicids2017 --augments gan --fold_gan_epochs 100
   python run_experiments.py --datasets cicids2017 --augments smote --threshold_mode f1_opt
+  python run_experiments.py --datasets cicids2017 --augments smote --augment_multiplier 5
   python run_experiments.py --dry_run
 """
 
@@ -51,6 +52,8 @@ def parse_args():
     parser.add_argument("--threshold_mode", type=str, default="fixed",
                         choices=["fixed", "f1_opt"],
                         help="fixed=0.5 기준, f1_opt=fold validation F1 기준 threshold 선택")
+    parser.add_argument("--augment_multiplier", type=float, default=2.0,
+                        help="증강 후 Bot 수 목표 배수 (기본값: 2)")
     parser.add_argument("--fold_gan_epochs", type=int, default=None,
                         help="fold-local GAN epoch override")
     parser.add_argument("--fold_wcgan_epochs", type=int, default=None,
@@ -116,18 +119,20 @@ def train_command(src_dir: Path, script: str, dataset: str, augment: str, args) 
         "--max_normal", str(args.max_normal),
         "--max_mismatch", str(max_mismatch),
         "--threshold_mode", args.threshold_mode,
+        "--augment_multiplier", str(args.augment_multiplier),
     ]
     if args.debug:
         cmd.append("--debug")
     return cmd
 
 
-def evaluate_command(src_dir: Path, dataset: str, augment: str) -> list[str]:
+def evaluate_command(src_dir: Path, dataset: str, augment: str, args) -> list[str]:
     return [
         sys.executable,
         str(src_dir / "evaluate.py"),
         "--dataset", dataset,
         "--augment", augment,
+        "--augment_multiplier", str(args.augment_multiplier),
     ]
 
 
@@ -160,6 +165,7 @@ def main():
     print(f"  max_normal       : {args.max_normal}")
     print(f"  max_mismatch     : {args.max_mismatch if args.max_mismatch is not None else 'dataset default (cicids2017=5, cicids2018/ctu13=2)'}")
     print(f"  threshold_mode   : {args.threshold_mode}")
+    print(f"  augment_multiplier: {args.augment_multiplier:g}x")
     print(f"  FOLD_GAN_EPOCHS  : {env.get('FOLD_GAN_EPOCHS', '500')}")
     print(f"  FOLD_WCGAN_EPOCHS: {env.get('FOLD_WCGAN_EPOCHS', '500')}")
     print(f"  dry_run          : {args.dry_run}")
@@ -203,7 +209,7 @@ def main():
                           "선택 모델 일부만 실행했으므로 평가를 건너뜁니다.")
                     continue
 
-                cmd = evaluate_command(src_dir, dataset, augment)
+                cmd = evaluate_command(src_dir, dataset, augment, args)
                 entry = run_command(cmd, root_dir, env, args.dry_run)
                 entry.update({"dataset": dataset, "augment": augment, "stage": "evaluate"})
                 run_log["commands"].append(entry)

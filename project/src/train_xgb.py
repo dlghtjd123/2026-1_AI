@@ -38,6 +38,8 @@ _parser.add_argument("--max_mismatch", type=float, default=None,
 _parser.add_argument("--threshold_mode", type=str, default="fixed",
                      choices=["fixed", "f1_opt"],
                      help="fixed=0.5, f1_opt=validation F1 기준 threshold 선택")
+_parser.add_argument("--augment_multiplier", type=float, default=2.0,
+                     help="증강 후 Bot 수 목표 배수 (기본값: 2)")
 _args = _parser.parse_args()
 AUGMENT      = _args.augment
 DATASET      = _args.dataset
@@ -48,6 +50,7 @@ MAX_MISMATCH = _args.max_mismatch if _args.max_mismatch is not None else (
     5.0 if DATASET == "cicids2017" else 2.0
 )
 THRESHOLD_MODE = _args.threshold_mode
+AUGMENT_MULTIPLIER = _args.augment_multiplier
 
 
 _SRC_DIR  = Path(__file__).resolve().parent
@@ -56,7 +59,8 @@ _ROOT     = _PROJECT.parent
 
 DATA_DIR   = _PROJECT / "data" / "processed" / DATASET / "flat"
 DATA_ROOT  = _PROJECT / "data" / "processed"
-_MODEL_SUFFIX = f"_{AUGMENT}" if AUGMENT != "none" else ""
+_MUL_SUFFIX = "" if AUGMENT == "none" or AUGMENT_MULTIPLIER == 2.0 else f"_mul{AUGMENT_MULTIPLIER:g}"
+_MODEL_SUFFIX = f"_{AUGMENT}{_MUL_SUFFIX}" if AUGMENT != "none" else ""
 MODEL_DIR  = _ROOT / "artifacts" / f"models_{DATASET}{_MODEL_SUFFIX}" / "xgb"
 RESULT_DIR = _ROOT / "artifacts" / f"results_{DATASET}{_MODEL_SUFFIX}"
 
@@ -115,7 +119,11 @@ def prepare_train_data(X, y, fold_id=None):
         )
         y_train_orig = y.copy()
 
-    X, y = augment_train_fold(X, y, AUGMENT, DATASET, DATA_ROOT, fold_id=fold_id)
+    X, y = augment_train_fold(
+        X, y, AUGMENT, DATASET, DATA_ROOT,
+        fold_id=fold_id,
+        augment_multiplier=AUGMENT_MULTIPLIER,
+    )
     return X, y, y_train_orig
 
 
@@ -155,6 +163,7 @@ def main():
     print(f"[CONFIG] debug            : {DEBUG}")
     print(f"[CONFIG] max_normal       : {MAX_NORMAL:,} (0=제한 없음)")
     print(f"[CONFIG] max_mismatch     : {MAX_MISMATCH:.0f}x  (train/val 봇넷 비율 최대 배수)")
+    print(f"[CONFIG] augment_multiplier: {AUGMENT_MULTIPLIER:g}x")
     print(f"[CONFIG] threshold_mode   : {THRESHOLD_MODE}")
     print(f"[CONFIG] data             : {DATA_DIR}")
 
@@ -257,6 +266,7 @@ def main():
         json.dump({
             "threshold": final_threshold,
             "threshold_mode": THRESHOLD_MODE,
+            "augment_multiplier": AUGMENT_MULTIPLIER,
             "best_fold_threshold": best_fold_thr,
             "fold_thresholds": fold_thresholds,
             "best_fold": best_fold_idx,
@@ -274,6 +284,7 @@ def main():
         "best_fold": best_fold_idx,
         "best_n_estimators": best_n_estimators,
         "threshold_mode": THRESHOLD_MODE,
+        "augment_multiplier": AUGMENT_MULTIPLIER,
         "final_threshold": final_threshold,
         "fold_thresholds": fold_thresholds,
         "saved_model": "final_trainval_refit",

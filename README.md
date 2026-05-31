@@ -100,6 +100,15 @@ python project/src/run_experiments.py \
   --threshold_mode f1_opt
 ```
 
+증강 배수를 바꿔서 실행:
+
+```bash
+python project/src/run_experiments.py \
+  --datasets cicids2017 \
+  --augments smote gan wcgan_gp \
+  --augment_multiplier 5
+```
+
 세 데이터셋 전체 실행:
 
 ```bash
@@ -158,6 +167,13 @@ python train_cnn_lstm.py --dataset cicids2017 --augment smote --threshold_mode f
 python evaluate.py --dataset cicids2017 --augment smote
 ```
 
+증강 배수 옵션을 개별 학습에 적용:
+
+```bash
+python train_cnn_lstm.py --dataset cicids2017 --augment smote --augment_multiplier 5
+python evaluate.py --dataset cicids2017 --augment smote --augment_multiplier 5
+```
+
 ### SMOTE
 
 ```bash
@@ -202,9 +218,9 @@ python evaluate.py --dataset cicids2017 --augment wcgan_gp
 | 방식 | Generator 사전학습 | 적용 위치 | validation 사용 여부 | 목표량 |
 |------|------------------|----------|--------------------|--------|
 | None | 없음 | 없음 | 원본 유지 | 없음 |
-| SMOTE | 없음 | fold train split 내부 | 미사용 | Bot 수 2배 |
-| GAN | fold마다 train split으로 학습 | fold train split 내부 | 미사용 | Bot 수 2배 |
-| WCGAN-GP | fold마다 train split으로 학습 | fold train split 내부 | 미사용 | Bot 수 2배 |
+| SMOTE | 없음 | fold train split 내부 | 미사용 | Bot 수 `--augment_multiplier`배 |
+| GAN | fold마다 train split으로 학습 | fold train split 내부 | 미사용 | Bot 수 `--augment_multiplier`배 |
+| WCGAN-GP | fold마다 train split으로 학습 | fold train split 내부 | 미사용 | Bot 수 `--augment_multiplier`배 |
 
 GAN/WCGAN-GP는 논문 실험의 엄밀성을 위해 **fold-local Generator**를 사용한다.
 
@@ -217,6 +233,13 @@ Fold k:
 ```
 
 최종 holdout test 평가 전에는 `trainval` 전체만으로 final Generator를 다시 학습하고, final classifier를 재학습한다.
+
+기본 증강 배수는 `2`이다. `--augment_multiplier 5`처럼 변경하면 기존 2배 결과를 덮어쓰지 않도록 별도 폴더에 저장된다.
+
+```text
+artifacts/results_cicids2017_smote/       # 기본 2배
+artifacts/results_cicids2017_smote_mul5/  # 5배
+```
 
 fold-local synthetic sample cache:
 
@@ -452,12 +475,15 @@ artifacts/results_{dataset}_{augment}/eval_results.json
 | `train_*.py` | `--max_normal` | 최대 Benign 수 |
 | `train_*.py` | `--max_mismatch` | Botnet 비율 증가 제한, 기본값은 `cicids2017=5`, `cicids2018=2`, `ctu13=2` |
 | `train_*.py` | `--threshold_mode` | `fixed`, `f1_opt` |
+| `train_*.py` | `--augment_multiplier` | 증강 후 Bot 수 목표 배수, 기본값 `2` |
 | `evaluate.py` | `--dataset` | 평가 데이터셋 |
 | `evaluate.py` | `--augment` | 평가할 증강 설정 |
+| `evaluate.py` | `--augment_multiplier` | 평가할 모델의 증강 배수 |
 | `run_experiments.py` | `--datasets` | 여러 데이터셋 자동 실행 |
 | `run_experiments.py` | `--augments` | 여러 증강 방식 자동 실행 |
 | `run_experiments.py` | `--models` | 실행할 모델 선택 |
 | `run_experiments.py` | `--threshold_mode` | 전체 학습에 threshold 모드 적용 |
+| `run_experiments.py` | `--augment_multiplier` | 전체 학습에 증강 배수 적용 |
 | `run_experiments.py` | `--dry_run` | 명령만 출력 |
 | `run_experiments.py` | `--fold_gan_epochs` | fold-local GAN epoch |
 | `run_experiments.py` | `--fold_wcgan_epochs` | fold-local WCGAN-GP epoch |
@@ -473,6 +499,15 @@ python visualize.py
 python visualize.py --augment smote
 python visualize.py --augment gan
 python visualize.py --augment wcgan_gp
+python visualize.py --augment smote --augment_multiplier 5
+```
+
+증강 방식별 F1 비교 그림은 어떤 `--augment`로 실행해도 함께 생성된다.
+
+```text
+artifacts/figures_augmentation_compare/01_f1_by_augmentation_dataset.png
+artifacts/figures_augmentation_compare/02_delta_f1_by_augmentation.png
+artifacts/figures_augmentation_compare_mul5/01_f1_by_augmentation_dataset.png
 ```
 
 ---

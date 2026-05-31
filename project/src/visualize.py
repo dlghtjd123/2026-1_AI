@@ -7,12 +7,14 @@ F1 / Recall 중심 시각화 (주 지표)
 각 데이터셋의 eval_results.json을 개별 로드하여 통합 시각화
 
 Output: artifacts/figures_{augment}/
+        artifacts/figures_augmentation_compare/
 
 Usage:
   python visualize.py
   python visualize.py --augment smote
   python visualize.py --augment gan
   python visualize.py --augment wcgan_gp
+  python visualize.py --augment smote --augment_multiplier 5
 """
 
 import argparse
@@ -33,7 +35,15 @@ _parser.add_argument(
     default="none",
     choices=["none", "smote", "gan", "wgan_gp", "wcgan_gp"],
 )
-AUGMENT = _parser.parse_args().augment
+_parser.add_argument(
+    "--augment_multiplier",
+    type=float,
+    default=2.0,
+    help="증강 후 Bot 수 목표 배수 (기본값: 2)",
+)
+_args = _parser.parse_args()
+AUGMENT = _args.augment
+AUGMENT_MULTIPLIER = _args.augment_multiplier
 
 
 # =========================================================
@@ -43,7 +53,14 @@ _SRC_DIR   = Path(__file__).resolve().parent
 _PROJECT   = _SRC_DIR.parent
 _ROOT      = _PROJECT.parent
 
-_SUFFIX    = f"_{AUGMENT}" if AUGMENT != "none" else ""
+def result_suffix(augment: str, augment_multiplier: float = 2.0) -> str:
+    if augment == "none":
+        return ""
+    mul_suffix = "" if augment_multiplier == 2.0 else f"_mul{augment_multiplier:g}"
+    return f"_{augment}{mul_suffix}"
+
+
+_SUFFIX    = result_suffix(AUGMENT, AUGMENT_MULTIPLIER)
 
 # 데이터셋별 결과 파일 경로
 EVAL_PATHS = {
@@ -55,6 +72,10 @@ EVAL_PATHS = {
 # 시각화 저장 경로
 FIGURE_DIR = _ROOT / "artifacts" / f"figures{_SUFFIX}"
 FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+
+_COMPARE_MUL_SUFFIX = "" if AUGMENT_MULTIPLIER == 2.0 else f"_mul{AUGMENT_MULTIPLIER:g}"
+COMPARE_FIGURE_DIR = _ROOT / "artifacts" / f"figures_augmentation_compare{_COMPARE_MUL_SUFFIX}"
+COMPARE_FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =========================================================
@@ -98,10 +119,29 @@ DATASET_LABELS = {
     "ctu13":      "CTU-13 Sc.9",
 }
 
+AUGMENTS_COMPARE = ["none", "smote", "gan", "wcgan_gp"]
+AUGMENT_LABELS = {
+    "none": "None",
+    "smote": "SMOTE",
+    "gan": "GAN",
+    "wcgan_gp": "WCGAN-GP",
+}
+AUGMENT_COLORS = {
+    "none": "#4C72B0",
+    "smote": "#55A868",
+    "gan": "#C44E52",
+    "wcgan_gp": "#8172B2",
+}
+
 
 # =========================================================
 # 데이터 로드
 # =========================================================
+def eval_path(dataset: str, augment: str) -> Path:
+    suffix = result_suffix(augment, AUGMENT_MULTIPLIER)
+    return _ROOT / "artifacts" / f"results_{dataset}{suffix}" / "eval_results.json"
+
+
 def load_dataset_results(dataset: str) -> dict:
     """
     각 데이터셋의 eval_results.json 로드
@@ -125,9 +165,30 @@ def load_dataset_results(dataset: str) -> dict:
     return {name_map[k]: v for k, v in raw.items() if k in name_map}
 
 
+def load_results_for(dataset: str, augment: str) -> dict:
+    path = eval_path(dataset, augment)
+    if not path.exists():
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    raw = data.get("test_results", {})
+    name_map = {
+        "rf": "RF", "xgb": "XGBoost",
+        "cnn_lstm": "CNN-LSTM", "gru": "GRU", "cnn_gru": "CNN-GRU",
+    }
+    return {name_map[k]: v for k, v in raw.items() if k in name_map}
+
+
 def get_val(data: dict, model: str, metric: str, default: float = 0.0) -> float:
     v = data.get(model, {}).get(metric)
     return v if v is not None else default
+
+
+def get_compare_val(results: dict, dataset: str, augment: str, model: str, metric: str) -> float:
+    v = results.get(dataset, {}).get(augment, {}).get(model, {}).get(metric)
+    return float(v) if v is not None else np.nan
 
 
 # =========================================================
@@ -359,7 +420,148 @@ def plot_roc_auc_heatmap(results: dict, filename: str) -> None:
 
 
 # =========================================================
-# 7. Confusion Matrix
+# 7. Augmentation Effect Comparison (None / SMOTE / GAN / WCGAN-GP)
+# =========================================================
+def load_augmentation_comparison_results() -> dict:
+    return {
+        ds: {
+            aug: load_results_for(ds, aug)
+            for aug in AUGMENTS_COMPARE
+        }
+        for ds in ["cicids2017", "cicids2018", "ctu13"]
+    }
+
+
+def plot_augmentation_f1_by_dataset(results: dict, filename: str) -> None:
+    datasets = ["cicids2017", "cicids2018", "ctu13"]
+    x = np.arange(len(MODELS))
+    width = 0.18
+    offsets = np.linspace(-1.5 * width, 1.5 * width, len(AUGMENTS_COMPARE))
+
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6), sharey=True)
+
+    for ax, ds in zip(axes, datasets):
+        for aug, offset in zip(AUGMENTS_COMPARE, offsets):
+            vals = [
+                get_compare_val(results, ds, aug, model, "f1")
+                for model in MODELS
+            ]
+            bars = ax.bar(
+                x + offset,
+                vals,
+                width,
+                label=AUGMENT_LABELS[aug],
+                color=AUGMENT_COLORS[aug],
+                alpha=0.88,
+            )
+            for bar, val in zip(bars, vals):
+                if np.isnan(val):
+                    continue
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    val + 0.01,
+                    f"{val:.3f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                    rotation=90,
+                )
+
+        ax.set_title(DATASET_LABELS[ds])
+        ax.set_xticks(x)
+        ax.set_xticklabels(MODELS, rotation=20, ha="right")
+        ax.set_ylim(0, 1.12)
+        ax.grid(axis="y", alpha=0.3)
+        ax.spines[["top", "right"]].set_visible(False)
+
+        missing = [
+            AUGMENT_LABELS[aug]
+            for aug in AUGMENTS_COMPARE
+            if not results.get(ds, {}).get(aug)
+        ]
+        if missing:
+            ax.text(
+                0.02,
+                0.96,
+                "Missing: " + ", ".join(missing),
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=8,
+                color="#555555",
+            )
+
+    axes[0].set_ylabel("F1-Score")
+    axes[-1].legend(loc="upper right", fontsize=9)
+    plt.suptitle("F1-Score by Augmentation Method", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(COMPARE_FIGURE_DIR / filename, bbox_inches="tight")
+    plt.close()
+    print(f"[SAVED] {COMPARE_FIGURE_DIR / filename}")
+
+
+def plot_delta_f1_by_augmentation(results: dict, filename: str) -> None:
+    datasets = ["cicids2017", "cicids2018", "ctu13"]
+    augments = ["smote", "gan", "wcgan_gp"]
+    x = np.arange(len(MODELS))
+    width = 0.22
+    offsets = np.linspace(-width, width, len(augments))
+
+    fig, axes = plt.subplots(1, 3, figsize=(21, 5), sharey=True)
+
+    for ax, ds in zip(axes, datasets):
+        baseline = [
+            get_compare_val(results, ds, "none", model, "f1")
+            for model in MODELS
+        ]
+
+        for aug, offset in zip(augments, offsets):
+            vals = []
+            for base, model in zip(baseline, MODELS):
+                aug_f1 = get_compare_val(results, ds, aug, model, "f1")
+                vals.append(np.nan if np.isnan(base) or np.isnan(aug_f1) else aug_f1 - base)
+
+            bars = ax.bar(
+                x + offset,
+                vals,
+                width,
+                label=AUGMENT_LABELS[aug],
+                color=AUGMENT_COLORS[aug],
+                alpha=0.9,
+            )
+            for bar, val in zip(bars, vals):
+                if np.isnan(val):
+                    continue
+                va = "bottom" if val >= 0 else "top"
+                y = val + 0.005 if val >= 0 else val - 0.005
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    y,
+                    f"{val:+.3f}",
+                    ha="center",
+                    va=va,
+                    fontsize=7,
+                    rotation=90,
+                )
+
+        ax.axhline(0, color="#333333", linewidth=1.0)
+        ax.set_title(DATASET_LABELS[ds])
+        ax.set_xticks(x)
+        ax.set_xticklabels(MODELS, rotation=20, ha="right")
+        ax.grid(axis="y", alpha=0.3)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    axes[0].set_ylabel("ΔF1 = F1(augmentation) - F1(none)")
+    axes[-1].legend(loc="upper right", fontsize=9)
+    plt.suptitle("F1 Change After Augmentation", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(COMPARE_FIGURE_DIR / filename, bbox_inches="tight")
+    plt.close()
+    print(f"[SAVED] {COMPARE_FIGURE_DIR / filename}")
+
+
+# =========================================================
+# 8. Confusion Matrix
 # =========================================================
 def plot_confusion_matrices(data: dict, title_prefix: str, filename: str) -> None:
     if not data:
@@ -470,6 +672,17 @@ def main():
     plot_roc_auc_comparison(results, "05_roc_auc_comparison.png")
     plot_roc_auc_heatmap(results,    "06_roc_auc_heatmap.png")
 
+    # ── 증강 방식 비교 ────────────────────────────────────
+    augmentation_results = load_augmentation_comparison_results()
+    plot_augmentation_f1_by_dataset(
+        augmentation_results,
+        "01_f1_by_augmentation_dataset.png",
+    )
+    plot_delta_f1_by_augmentation(
+        augmentation_results,
+        "02_delta_f1_by_augmentation.png",
+    )
+
     # ── Confusion Matrix ──────────────────────────────────
     plot_confusion_matrices(
         results["cicids2017"],
@@ -496,6 +709,9 @@ def main():
     print("  보조 지표")
     print("    05_roc_auc_comparison.png")
     print("    06_roc_auc_heatmap.png")
+    print("  증강 방식 비교")
+    print(f"    {COMPARE_FIGURE_DIR / '01_f1_by_augmentation_dataset.png'}")
+    print(f"    {COMPARE_FIGURE_DIR / '02_delta_f1_by_augmentation.png'}")
     print("  Confusion Matrix")
     print("    07_cm_cic2017.png")
     print("    08_cm_cic2018.png")

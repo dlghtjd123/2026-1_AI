@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 TARGET_RATIO = 0.1   # 하위 호환용 (내부에서 직접 사용 안 함)
-AUGMENT_MULTIPLIER = 2.0  # 증강 후 봇넷 수 = 원본 봇넷 × AUGMENT_MULTIPLIER
+DEFAULT_AUGMENT_MULTIPLIER = 2.0  # 증강 후 봇넷 수 = 원본 봇넷 × multiplier
 GAN_EPOCHS = int(os.environ.get("FOLD_GAN_EPOCHS", "500"))
 WCGAN_EPOCHS = int(os.environ.get("FOLD_WCGAN_EPOCHS", "500"))
 GAN_BATCH_SIZE = 64
@@ -96,11 +96,15 @@ def subsample_benign(
 # =========================================================
 # SMOTE
 # =========================================================
-def _smote(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _smote(
+    X: np.ndarray,
+    y: np.ndarray,
+    augment_multiplier: float = DEFAULT_AUGMENT_MULTIPLIER,
+) -> tuple[np.ndarray, np.ndarray]:
     from imblearn.over_sampling import SMOTE
 
     n_current  = int(y.sum())
-    n_target   = int(n_current * AUGMENT_MULTIPLIER)
+    n_target   = int(n_current * augment_multiplier)
 
     if n_target <= n_current:
         print(f"    [AUG] SMOTE 불필요 (현재 Bot={n_current:,} >= 목표 {n_target:,})")
@@ -313,7 +317,8 @@ def _train_fold_wcgan_generator(X_seg: np.ndarray, device, seg_idx: int):
 
 
 def _cache_path(data_root: Path, dataset: str, augment: str, fold_id: str,
-                n_current: int, n_generate: int, n_features: int) -> Path:
+                n_current: int, n_generate: int, n_features: int,
+                augment_multiplier: float) -> Path:
     cache_dir = data_root / f"{dataset}_{augment}_fold_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     train_tag = (
@@ -322,7 +327,7 @@ def _cache_path(data_root: Path, dataset: str, augment: str, fold_id: str,
     )
     return cache_dir / (
         f"{fold_id}_bot{n_current}_gen{n_generate}_feat{n_features}"
-        f"_mul{AUGMENT_MULTIPLIER:g}_{train_tag}.npy"
+        f"_mul{augment_multiplier:g}_{train_tag}.npy"
     )
 
 
@@ -362,17 +367,21 @@ def _fold_gan_augment(
     dataset: str,
     data_root: Path,
     fold_id: str,
+    augment_multiplier: float = DEFAULT_AUGMENT_MULTIPLIER,
 ) -> tuple[np.ndarray, np.ndarray]:
     import torch
 
     n_current = int(y.sum())
-    n_target = int(n_current * AUGMENT_MULTIPLIER)
+    n_target = int(n_current * augment_multiplier)
     n_generate = n_target - n_current
     if n_generate <= 0:
         print(f"    [AUG] {augment.upper()} 불필요 (현재 Bot={n_current:,})")
         return X, y
 
-    cache_file = _cache_path(data_root, dataset, augment, fold_id, n_current, n_generate, X.shape[1])
+    cache_file = _cache_path(
+        data_root, dataset, augment, fold_id, n_current, n_generate, X.shape[1],
+        augment_multiplier,
+    )
     if cache_file.exists():
         X_fake = np.load(cache_file)
         print(f"    [AUG] {augment.upper()} fold-local cache 사용: {cache_file.name}")
@@ -429,6 +438,7 @@ def _gan_augment(
     y: np.ndarray,
     gen_path: Path,
     conditional: bool = False,
+    augment_multiplier: float = DEFAULT_AUGMENT_MULTIPLIER,
 ) -> tuple[np.ndarray, np.ndarray]:
     import torch
 
@@ -446,7 +456,7 @@ def _gan_augment(
     label_dim  = ckpt.get("label_dim", 16)
 
     n_current  = int(y.sum())
-    n_target   = int(n_current * AUGMENT_MULTIPLIER)
+    n_target   = int(n_current * augment_multiplier)
     n_generate = n_target - n_current
 
     if n_generate <= 0:
@@ -533,6 +543,7 @@ def augment_train_fold(
     dataset: str,
     data_root: Path,
     fold_id: str | int | None = None,
+    augment_multiplier: float = DEFAULT_AUGMENT_MULTIPLIER,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     K-fold 내부에서 train fold에만 증강 적용.
@@ -545,6 +556,7 @@ def augment_train_fold(
         dataset:   데이터셋 이름 ('cicids2017'/'cicids2018'/'ctu13')
         data_root: data/processed 경로
         fold_id:   fold-local GAN/WCGAN 학습 및 캐시 구분자
+        augment_multiplier: 증강 후 목표 Bot 수 배수 (예: 2, 5, 10)
 
     Returns:
         증강된 X_train, y_train
@@ -563,21 +575,24 @@ def augment_train_fold(
         n_feat = X_flat.shape[1]
 
     print(f"  [AUG] train: {len(y_train):,}  val: -  "
-          f"Bot 비율(원본)={y_train.mean():.6f}")
+          f"Bot 비율(원본)={y_train.mean():.6f}  "
+          f"증강 목표={augment_multiplier:g}x")
 
     if augment == "smote":
-        X_aug, y_aug = _smote(X_flat, y_train)
+        X_aug, y_aug = _smote(X_flat, y_train, augment_multiplier=augment_multiplier)
 
     elif augment == "gan":
         X_aug, y_aug = _fold_gan_augment(
             X_flat, y_train, augment, dataset, data_root,
             fold_id=str(fold_id or "unknown"),
+            augment_multiplier=augment_multiplier,
         )
 
     elif augment in ("wgan_gp", "wcgan_gp"):
         X_aug, y_aug = _fold_gan_augment(
             X_flat, y_train, "wcgan_gp", dataset, data_root,
             fold_id=str(fold_id or "unknown"),
+            augment_multiplier=augment_multiplier,
         )
 
     else:
