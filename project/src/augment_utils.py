@@ -26,7 +26,20 @@ from pathlib import Path
 
 import numpy as np
 
+<<<<<<< Updated upstream
 TARGET_RATIO = 0.1   # SMOTE/GAN/WCGAN-GP 공통 증강 비율 (공정 비교)
+=======
+TARGET_RATIO = 0.1   # 하위 호환용 (내부에서 직접 사용 안 함)
+AUGMENT_MULTIPLIER = float(os.environ.get("AUGMENT_MULTIPLIER", "2.0"))  # 증강 후 봇넷 수 = 원본 봇넷 × AUGMENT_MULTIPLIER
+GAN_EPOCHS = int(os.environ.get("FOLD_GAN_EPOCHS", "500"))
+WCGAN_EPOCHS = int(os.environ.get("FOLD_WCGAN_EPOCHS", "1000"))
+GAN_BATCH_SIZE = 1024
+GAN_NOISE_DIM = 100
+WCGAN_LABEL_DIM = 16
+WCGAN_N_CRITIC = 5
+WCGAN_LAMBDA_GP = 10.0
+MIN_SEG_SIZE = 30
+>>>>>>> Stashed changes
 
 
 # =========================================================
@@ -140,6 +153,271 @@ def _make_wcgan_generator(noise_dim: int, label_dim: int, n_features: int):
     return ConditionalGenerator()
 
 
+<<<<<<< Updated upstream
+=======
+def _segment_botnet(X_bot: np.ndarray, n_segments: int = 4) -> list[np.ndarray]:
+    if len(X_bot) < MIN_SEG_SIZE * 2:
+        return [X_bot]
+
+    try:
+        from sklearn.cluster import KMeans
+
+        k = max(2, min(n_segments, len(X_bot) // MIN_SEG_SIZE))
+        labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X_bot)
+        segments = [X_bot[labels == i] for i in range(k) if np.sum(labels == i) >= MIN_SEG_SIZE]
+        return segments if segments else [X_bot]
+    except Exception:
+        return [X_bot]
+
+
+def _make_discriminator(n_features: int):
+    import torch.nn as nn
+
+    return nn.Sequential(
+        nn.Linear(n_features, 256), nn.LeakyReLU(0.2), nn.Dropout(0.3),
+        nn.Linear(256, 128),        nn.LeakyReLU(0.2), nn.Dropout(0.3),
+        nn.Linear(128, 1),
+    )
+
+
+def _make_wcgan_critic(label_dim: int, n_features: int):
+    import torch
+    import torch.nn as nn
+
+    class ConditionalCritic(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.label_emb = nn.Embedding(2, label_dim)
+            self.net = nn.Sequential(
+                nn.Linear(n_features + label_dim, 512), nn.LeakyReLU(0.2), nn.Dropout(0.3),
+                nn.Linear(512, 256),                    nn.LeakyReLU(0.2), nn.Dropout(0.3),
+                nn.Linear(256, 128),                    nn.LeakyReLU(0.2),
+                nn.Linear(128, 1),
+            )
+
+        def forward(self, x, labels):
+            return self.net(torch.cat([x, self.label_emb(labels)], dim=1)).squeeze(1)
+
+    return ConditionalCritic()
+
+
+def _train_fold_gan_generator(X_seg: np.ndarray, device, seg_idx: int):
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    n_features = X_seg.shape[1]
+    generator = _make_gan_generator(GAN_NOISE_DIM, n_features).to(device)
+    discriminator = _make_discriminator(n_features).to(device)
+    opt_g = torch.optim.Adam(generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
+    opt_d = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.5, 0.999))
+    criterion = nn.BCEWithLogitsLoss()
+
+    batch_size = min(GAN_BATCH_SIZE, max(2, len(X_seg)))
+    loader = DataLoader(
+        TensorDataset(torch.tensor(X_seg, dtype=torch.float32)),
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=len(X_seg) >= batch_size * 2,
+    )
+
+    print(f"    [GAN train seg={seg_idx}] real={len(X_seg):,} epochs={GAN_EPOCHS}")
+    for epoch in range(GAN_EPOCHS):
+        if (epoch + 1) % 100 == 0:
+            print(f"      [GAN seg={seg_idx}] {epoch+1}/{GAN_EPOCHS} epochs 완료")
+        for (x_real,) in loader:
+            x_real = x_real.to(device)
+            bs = x_real.size(0)
+
+            z = torch.randn(bs, GAN_NOISE_DIM, device=device)
+            x_fake = generator(z).detach()
+            loss_d = (
+                criterion(discriminator(x_real).squeeze(1), torch.ones(bs, device=device)) +
+                criterion(discriminator(x_fake).squeeze(1), torch.zeros(bs, device=device))
+            ) / 2
+            opt_d.zero_grad()
+            loss_d.backward()
+            opt_d.step()
+
+            z = torch.randn(bs, GAN_NOISE_DIM, device=device)
+            loss_g = criterion(discriminator(generator(z)).squeeze(1), torch.ones(bs, device=device))
+            opt_g.zero_grad()
+            loss_g.backward()
+            opt_g.step()
+
+    return generator.eval()
+
+
+def _compute_gradient_penalty(critic, real, fake, labels, device):
+    import torch
+
+    bs = real.size(0)
+    alpha = torch.rand(bs, 1, device=device).expand_as(real)
+    interp = (alpha * real + (1 - alpha) * fake).requires_grad_(True)
+    d_interp = critic(interp, labels)
+    grads = torch.autograd.grad(
+        outputs=d_interp,
+        inputs=interp,
+        grad_outputs=torch.ones_like(d_interp),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+    return WCGAN_LAMBDA_GP * ((grads.view(bs, -1).norm(2, dim=1) - 1) ** 2).mean()
+
+
+def _train_fold_wcgan_generator(X_seg: np.ndarray, device, seg_idx: int):
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    n_features = X_seg.shape[1]
+    generator = _make_wcgan_generator(GAN_NOISE_DIM, WCGAN_LABEL_DIM, n_features).to(device)
+    critic = _make_wcgan_critic(WCGAN_LABEL_DIM, n_features).to(device)
+    opt_g = torch.optim.Adam(generator.parameters(), lr=1e-4, betas=(0.0, 0.9))
+    opt_d = torch.optim.Adam(critic.parameters(), lr=1e-4, betas=(0.0, 0.9))
+
+    batch_size = min(GAN_BATCH_SIZE, max(2, len(X_seg)))
+    loader = DataLoader(
+        TensorDataset(torch.tensor(X_seg, dtype=torch.float32)),
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=len(X_seg) >= batch_size * 2,
+    )
+
+    print(f"    [WCGAN-GP train seg={seg_idx}] real={len(X_seg):,} epochs={WCGAN_EPOCHS}")
+    for epoch in range(WCGAN_EPOCHS):
+        if (epoch + 1) % 100 == 0:
+            print(f"      [WCGAN-GP seg={seg_idx}] {epoch+1}/{WCGAN_EPOCHS} epochs 완료")
+        for (x_real,) in loader:
+            x_real = x_real.to(device)
+            bs = x_real.size(0)
+            labels = torch.ones(bs, dtype=torch.long, device=device)
+
+            for _critic_step in range(WCGAN_N_CRITIC):
+                z = torch.randn(bs, GAN_NOISE_DIM, device=device)
+                x_fake = generator(z, labels).detach()
+                gp = _compute_gradient_penalty(critic, x_real, x_fake, labels, device)
+                loss_d = -critic(x_real, labels).mean() + critic(x_fake, labels).mean() + gp
+                opt_d.zero_grad()
+                loss_d.backward()
+                opt_d.step()
+
+            z = torch.randn(bs, GAN_NOISE_DIM, device=device)
+            loss_g = -critic(generator(z, labels), labels).mean()
+            opt_g.zero_grad()
+            loss_g.backward()
+            opt_g.step()
+
+    return generator.eval()
+
+
+def _cache_path(data_root: Path, dataset: str, augment: str, fold_id: str,
+                n_current: int, n_generate: int, n_features: int) -> Path:
+    cache_dir = data_root / f"{dataset}_{augment}_fold_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    train_tag = (
+        f"e{GAN_EPOCHS}" if augment == "gan"
+        else f"e{WCGAN_EPOCHS}_c{WCGAN_N_CRITIC}_gp{WCGAN_LAMBDA_GP:g}"
+    )
+    return cache_dir / (
+        f"{fold_id}_bot{n_current}_gen{n_generate}_feat{n_features}"
+        f"_mul{AUGMENT_MULTIPLIER:g}_{train_tag}.npy"
+    )
+
+
+def _generate_from_fold_generators(generators, segment_sizes, n_generate, conditional, device):
+    import torch
+
+    total = sum(segment_sizes)
+    generated = []
+    allocated = 0
+    with torch.no_grad():
+        for i, (generator, seg_size) in enumerate(zip(generators, segment_sizes)):
+            n_gen_i = int(n_generate * seg_size / total)
+            if i == len(generators) - 1:
+                n_gen_i = n_generate - allocated
+            allocated += n_gen_i
+            if n_gen_i <= 0:
+                continue
+
+            chunks = []
+            for start in range(0, n_gen_i, 1024):
+                bs = min(1024, n_gen_i - start)
+                z = torch.randn(bs, GAN_NOISE_DIM, device=device)
+                if conditional:
+                    labels = torch.ones(bs, dtype=torch.long, device=device)
+                    chunks.append(generator(z, labels).cpu().numpy())
+                else:
+                    chunks.append(generator(z).cpu().numpy())
+            generated.append(np.vstack(chunks))
+
+    return np.vstack(generated).astype(np.float32)
+
+
+def _fold_gan_augment(
+    X: np.ndarray,
+    y: np.ndarray,
+    augment: str,
+    dataset: str,
+    data_root: Path,
+    fold_id: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    import torch
+
+    n_current = int(y.sum())
+    n_target = int(n_current * AUGMENT_MULTIPLIER)
+    n_generate = n_target - n_current
+    if n_generate <= 0:
+        print(f"    [AUG] {augment.upper()} 불필요 (현재 Bot={n_current:,})")
+        return X, y
+
+    cache_file = _cache_path(data_root, dataset, augment, fold_id, n_current, n_generate, X.shape[1])
+    if cache_file.exists():
+        X_fake = np.load(cache_file)
+        print(f"    [AUG] {augment.upper()} fold-local cache 사용: {cache_file.name}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        seed = 42 if fold_id == "final" else 42 + sum(ord(ch) for ch in fold_id)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        X_bot = X[y == 1].astype(np.float32)
+        segments = _segment_botnet(X_bot)
+        conditional = augment in ("wgan_gp", "wcgan_gp")
+        print(f"    [AUG] {augment.upper()}: fold-local Generator 학습 "
+              f"(fold={fold_id}, segments={len(segments)}, fake={n_generate:,})")
+
+        if conditional:
+            generators = [
+                _train_fold_wcgan_generator(seg, device, i)
+                for i, seg in enumerate(segments)
+            ]
+        else:
+            generators = [
+                _train_fold_gan_generator(seg, device, i)
+                for i, seg in enumerate(segments)
+            ]
+
+        X_fake = _generate_from_fold_generators(
+            generators,
+            [len(seg) for seg in segments],
+            n_generate,
+            conditional,
+            device,
+        )
+        np.save(cache_file, X_fake)
+        print(f"    [AUG] fold-local fake 저장: {cache_file}")
+
+    X_aug = np.vstack([X, X_fake]).astype(np.float32)
+    y_aug = np.concatenate([y, np.ones(len(X_fake), dtype=np.int32)])
+    rng = np.random.RandomState(42)
+    idx = rng.permutation(len(X_aug))
+    X_aug, y_aug = X_aug[idx], y_aug[idx]
+    print(f"    [AUG] {augment.upper()}: {n_current:,} → {y_aug.sum():,} Bot "
+          f"(+{len(X_fake):,})  비율={y_aug.mean():.4f}")
+    return X_aug, y_aug
+
+
+>>>>>>> Stashed changes
 # =========================================================
 # GAN / WCGAN-GP 증강
 # 새 형식: {"generators": [state_dict, ...], "segment_sizes": [...], ...}

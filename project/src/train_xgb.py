@@ -157,15 +157,22 @@ def main():
         )
         model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
-        val_prob    = model.predict_proba(X_val)[:, 1]
-        y_pred      = (val_prob >= 0.5).astype(int)
+        val_prob = model.predict_proba(X_val)[:, 1]
+
+        # val F1 최적 threshold 탐색
+        thresholds = np.arange(0.05, 0.95, 0.01)
+        f1_scores  = [f1_score(y_val, (val_prob >= t).astype(int), zero_division=0)
+                      for t in thresholds]
+        best_thr   = float(thresholds[np.argmax(f1_scores)])
+
+        y_pred      = (val_prob >= best_thr).astype(int)
         val_metrics = compute_metrics(y_val, y_pred, val_prob)
-        val_metrics["selected_threshold"] = 0.5
+        val_metrics["selected_threshold"] = best_thr
         val_metrics["fold"]               = fold
-        val_metrics["threshold"]          = 0.5
+        val_metrics["threshold"]          = best_thr
         fold_results.append(val_metrics)
 
-        print(f"  thr=0.50 | F1={val_metrics['f1']:.4f} | "
+        print(f"  thr={best_thr:.2f} | F1={val_metrics['f1']:.4f} | "
               f"Recall={val_metrics['recall']:.4f} | "
               f"Precision={val_metrics['precision']:.4f} | "
               f"ROC-AUC={val_metrics.get('roc_auc', 0):.4f}")
@@ -174,7 +181,7 @@ def main():
         if best_fold_score is None or score > best_fold_score:
             best_fold_score = score
             best_fold_model = model
-            best_fold_thr   = 0.5
+            best_fold_thr   = best_thr
             best_fold_idx   = fold
 
     summary = print_fold_summary(fold_results)
@@ -182,8 +189,20 @@ def main():
 
     joblib.dump(best_fold_model, MODEL_DIR / "xgb_flow.pkl")
 
+    all_thresholds = [r["selected_threshold"] for r in fold_results]
+    mean_thr = float(np.mean(all_thresholds))
     with open(MODEL_DIR / "xgb_flow_threshold.json", "w", encoding="utf-8") as f:
+<<<<<<< Updated upstream
         json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
+=======
+        json.dump({
+            "threshold": mean_thr,
+            "per_fold_thresholds": all_thresholds,
+            "best_fold": best_fold_idx,
+            "best_n_estimators": best_n_estimators,
+            "saved_model": "final_trainval_refit",
+        }, f, indent=4)
+>>>>>>> Stashed changes
 
     output = {
         "dataset": DATASET, "augment": AUGMENT, "n_folds": N_FOLDS,

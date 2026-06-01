@@ -137,9 +137,23 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
     criterion = FocalLoss(alpha=0.75, gamma=2.0)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
+<<<<<<< Updated upstream
     num_epochs, patience, min_epochs = 30, 6, 20
     best_score = best_state = best_val_metrics = None
     best_threshold, best_epoch, patience_counter = "argmax", 0, 0
+=======
+    num_epochs       = 30
+    patience         = 6
+    min_epochs       = 20
+    best_score       = None
+    best_state       = None
+    best_threshold   = 0.5
+    best_epoch       = 0
+    best_val_metrics = None
+    best_val_prob    = None
+    best_val_true    = None
+    patience_counter = 0
+>>>>>>> Stashed changes
 
     for epoch in range(1, num_epochs + 1):
         model.train()
@@ -165,9 +179,20 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
         print(f"  [Fold {fold} Epoch {epoch:02d}] train={train_loss:.4f} | "
               f"val={val_loss:.4f} | argmax | f1={cvm['f1']:.4f} | recall={cvm['recall']:.4f}")
 
+<<<<<<< Updated upstream
         if best_score is None or score > best_score:
             best_score, best_state = score, copy.deepcopy(model.state_dict())
             best_epoch, best_val_metrics, patience_counter = epoch, cvm, 0
+=======
+        if best_score is None or current_score > best_score:
+            best_score       = current_score
+            best_state       = copy.deepcopy(model.state_dict())
+            best_epoch       = epoch
+            best_val_metrics = current_val_metrics
+            best_val_prob    = y_val_prob.copy()
+            best_val_true    = y_val_true.copy()
+            patience_counter = 0
+>>>>>>> Stashed changes
         else:
             patience_counter += 1
 
@@ -176,9 +201,24 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
             break
 
     model.load_state_dict(best_state)
+<<<<<<< Updated upstream
     best_val_metrics["selected_threshold"] = "argmax"
     print(f"  [Fold {fold}] Best epoch: {best_epoch}")
     return model, "argmax", best_val_metrics, n_feat
+=======
+
+    # best epoch val prob으로 F1 최적 threshold 탐색
+    thresholds = np.arange(0.05, 0.95, 0.01)
+    f1_arr     = [f1_score(best_val_true, (best_val_prob >= t).astype(int), zero_division=0)
+                  for t in thresholds]
+    best_threshold = float(thresholds[np.argmax(f1_arr)])
+    y_pred_opt = (best_val_prob >= best_threshold).astype(int)
+    best_val_metrics = compute_metrics(best_val_true, y_pred_opt, best_val_prob)
+    best_val_metrics["selected_threshold"] = best_threshold
+
+    print(f"  [Fold {fold}] Best epoch: {best_epoch}  thr={best_threshold:.2f}")
+    return model, best_threshold, best_val_metrics, n_features, best_val_prob, best_epoch
+>>>>>>> Stashed changes
 
 
 def print_fold_summary(fold_results):
@@ -282,8 +322,20 @@ def main():
         "dropout":       0.3,
     }, MODEL_DIR / "cnn_gru_flow.pt")
 
+    all_thresholds = [r["selected_threshold"] for r in fold_results]
+    mean_thr = float(np.mean(all_thresholds))
     with open(MODEL_DIR / "cnn_gru_flow_threshold.json", "w", encoding="utf-8") as f:
+<<<<<<< Updated upstream
         json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
+=======
+        json.dump({
+            "threshold": mean_thr,
+            "per_fold_thresholds": all_thresholds,
+            "best_fold": best_fold_idx,
+            "best_epoch": best_epoch,
+            "saved_model": "final_trainval_refit",
+        }, f, indent=4)
+>>>>>>> Stashed changes
 
     output = {
         "dataset": DATASET, "augment": AUGMENT, "n_folds": N_FOLDS,

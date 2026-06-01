@@ -173,9 +173,14 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
     min_epochs       = 20
     best_score       = None
     best_state       = None
-    best_threshold   = "argmax"
+    best_threshold   = 0.5
     best_epoch       = 0
     best_val_metrics = None
+<<<<<<< Updated upstream
+=======
+    best_val_prob    = None
+    best_val_true    = None
+>>>>>>> Stashed changes
     patience_counter = 0
 
     for epoch in range(1, num_epochs + 1):
@@ -215,9 +220,16 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
         if best_score is None or current_score > best_score:
             best_score       = current_score
             best_state       = copy.deepcopy(model.state_dict())
+<<<<<<< Updated upstream
             best_threshold   = current_threshold
             best_epoch       = epoch
             best_val_metrics = current_val_metrics
+=======
+            best_epoch       = epoch
+            best_val_metrics = current_val_metrics
+            best_val_prob    = y_val_prob.copy()
+            best_val_true    = y_val_true.copy()
+>>>>>>> Stashed changes
             patience_counter = 0
         else:
             patience_counter += 1
@@ -227,9 +239,67 @@ def train_one_fold(X_train, y_train, X_val, y_val, device, fold):
             break
 
     model.load_state_dict(best_state)
+
+    # best epoch val prob으로 F1 최적 threshold 탐색
+    thresholds = np.arange(0.05, 0.95, 0.01)
+    f1_arr     = [f1_score(best_val_true, (best_val_prob >= t).astype(int), zero_division=0)
+                  for t in thresholds]
+    best_threshold = float(thresholds[np.argmax(f1_arr)])
+    y_pred_opt = (best_val_prob >= best_threshold).astype(int)
+    best_val_metrics = compute_metrics(best_val_true, y_pred_opt, best_val_prob)
     best_val_metrics["selected_threshold"] = best_threshold
+<<<<<<< Updated upstream
     print(f"  [Fold {fold}] Best epoch: {best_epoch}")
     return model, best_threshold, best_val_metrics, n_features
+=======
+
+    print(f"  [Fold {fold}] Best epoch: {best_epoch}  thr={best_threshold:.2f}")
+    return model, best_threshold, best_val_metrics, n_features, best_val_prob, best_epoch
+
+
+def prepare_train_data(X, y, fold_id=None):
+    y_train_orig = y.copy()
+    if MAX_NORMAL > 0:
+        from augment_utils import subsample_benign
+        _nf = X.shape[1]
+        X_f, y = subsample_benign(
+            X.reshape(len(X), -1), y,
+            max_normal=MAX_NORMAL, max_mismatch=MAX_MISMATCH
+        )
+        X = X_f.reshape(-1, _nf, 1)
+        y_train_orig = y.copy()
+
+    X, y = augment_train_fold(X, y, AUGMENT, DATASET, DATA_ROOT, fold_id=fold_id)
+    return X, y, y_train_orig
+
+
+def build_criterion():
+    return nn.CrossEntropyLoss() if AUGMENT != "none" else FocalLoss(alpha=FOCAL_ALPHA, gamma=2.0)
+
+
+def train_final_model(X_train, y_train, device, num_epochs, criterion):
+    n_features = X_train.shape[2]
+    loader = DataLoader(SequenceDataset(X_train, y_train),
+                        batch_size=128, shuffle=True, num_workers=0)
+    model = GRUModel(n_features=n_features).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        running_loss = 0.0
+        for X_batch, y_batch in loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(X_batch), y_batch)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+            running_loss += loss.item() * X_batch.size(0)
+        print(f"  [FINAL Epoch {epoch:02d}/{num_epochs:02d}] "
+              f"train={running_loss / len(loader.dataset):.4f}")
+
+    return model, n_features
+>>>>>>> Stashed changes
 
 
 def print_fold_summary(fold_results: list[dict]) -> dict:
@@ -342,8 +412,20 @@ def main():
         MODEL_DIR / "gru_flow.pt",
     )
 
+    all_thresholds = [r["selected_threshold"] for r in fold_results]
+    mean_thr = float(np.mean(all_thresholds))
     with open(MODEL_DIR / "gru_flow_threshold.json", "w", encoding="utf-8") as f:
+<<<<<<< Updated upstream
         json.dump({"threshold": best_fold_thr, "best_fold": best_fold_idx}, f, indent=4)
+=======
+        json.dump({
+            "threshold": mean_thr,
+            "per_fold_thresholds": all_thresholds,
+            "best_fold": best_fold_idx,
+            "best_epoch": best_epoch,
+            "saved_model": "final_trainval_refit",
+        }, f, indent=4)
+>>>>>>> Stashed changes
 
     output = {
         "dataset":        DATASET,
