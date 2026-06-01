@@ -17,6 +17,7 @@ Scaler:
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -34,12 +35,15 @@ _SRC_DIR  = Path(__file__).resolve().parent
 BASE_DIR  = _SRC_DIR.parent
 
 RAW_DIR   = BASE_DIR / "data" / "raw" / "ctu-13"
-SAVE_ROOT = BASE_DIR / "data" / "processed" / "ctu13"
+DEFAULT_SAVE_ROOT = BASE_DIR / "data" / "processed" / "ctu13"
 RAW_CSV   = RAW_DIR / "scenario9_raw.csv"
 CIC17_DIR = BASE_DIR / "data" / "processed" / "cicids2017"
+CIC17_ALL_DIR = BASE_DIR / "data" / "processed" / "cicids2017_all"
 
 SCALER_PATH   = CIC17_DIR / "seq" / "scaler_flow.pkl"
 SEL_FEAT_PATH = CIC17_DIR / "selected_features.json"   # chi2 선택 피처
+ALL_SCALER_PATH = CIC17_ALL_DIR / "seq" / "scaler_flow.pkl"
+ALL_FEAT_PATH = CIC17_ALL_DIR / "selected_features.json"
 
 BOTNET_IPS: set[str] = {
     "147.32.84.165", "147.32.84.191", "147.32.84.192",
@@ -48,6 +52,8 @@ BOTNET_IPS: set[str] = {
 
 COLUMN_MAP: dict[str, str] = {
     "src_ip": "Source IP", "timestamp": "Timestamp", "protocol": "Protocol",
+    "src_port": "Source Port", "dst_port": "Destination Port",
+    "sport": "Source Port", "dport": "Destination Port",
     "flow_duration": "Flow Duration",
     "tot_fwd_pkts": "Total Fwd Packets", "tot_bwd_pkts": "Total Backward Packets",
     "totlen_fwd_pkts": "Total Length of Fwd Packets",
@@ -123,6 +129,11 @@ ML_FEATURES: list[str] = [
     "Protocol",
 ]
 
+ALL_FEATURES: list[str] = [
+    "Source Port", "Destination Port",
+    *ML_FEATURES,
+]
+
 LOG_TRANSFORM_FEATURES: list[str] = [
     "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
     "Total Length of Fwd Packets", "Total Length of Bwd Packets",
@@ -176,8 +187,8 @@ def assign_labels(df):
     print(f"[LABEL] Botnet 비율: {df['Label_binary'].mean():.4f}")
     return df
 
-def clean_features(df):
-    available = [c for c in ML_FEATURES if c in df.columns]
+def clean_features(df, feature_cols):
+    available = [c for c in feature_cols if c in df.columns]
     for col in available:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -217,16 +228,16 @@ def split_random(df: pd.DataFrame, test_ratio: float = 0.2,
         print(f"  {name} Botnet 비율: {s['Label_binary'].mean():.4f}")
     return df_tv, df_te
 
-def apply_scaler(X_trainval, X_test):
-    if not SCALER_PATH.exists():
-        raise FileNotFoundError(f"CIC2017 scaler 없음: {SCALER_PATH}")
-    cic_scaler   = joblib.load(SCALER_PATH)
+def apply_scaler(X_trainval, X_test, scaler_path: Path, save_root: Path):
+    if not scaler_path.exists():
+        raise FileNotFoundError(f"CIC2017 scaler 없음: {scaler_path}")
+    cic_scaler   = joblib.load(scaler_path)
     X_tv_scaled  = cic_scaler.transform(X_trainval).astype(np.float32)
     X_te_scaled  = cic_scaler.transform(X_test).astype(np.float32)
     aligner      = MinMaxScaler()
     X_tv_aligned = aligner.fit_transform(X_tv_scaled).astype(np.float32)
     X_te_aligned = aligner.transform(X_te_scaled).astype(np.float32)
-    joblib.dump(aligner, SAVE_ROOT / "aligner.pkl")
+    joblib.dump(aligner, save_root / "aligner.pkl")
     print(f"[SCALER] CIC2017 MinMaxScaler + Secondary MinMaxScaler 완료")
     return X_tv_aligned, X_te_aligned
 
@@ -234,13 +245,13 @@ def apply_scaler(X_trainval, X_test):
 # =========================================================
 # Chi-square 피처 선택 적용 (CIC2017 기준)
 # =========================================================
-def apply_feature_selection(X_tv, X_te):
-    if not SEL_FEAT_PATH.exists():
+def apply_feature_selection(X_tv, X_te, selected_path: Path):
+    if not selected_path.exists():
         raise FileNotFoundError(
-            f"selected_features.json 없음: {SEL_FEAT_PATH}\n"
+            f"selected_features.json 없음: {selected_path}\n"
             "먼저 preprocess_cicids2017.py 를 실행하세요."
         )
-    with open(SEL_FEAT_PATH, "r") as f:
+    with open(selected_path, "r") as f:
         sel = json.load(f)
     selected_indices = sel["indices"]
     selected_names   = sel["features"]
@@ -254,9 +265,10 @@ def apply_feature_selection(X_tv, X_te):
     return X_tv_sel, X_te_sel, n_features
 
 
-def save_outputs(X_trainval, y_trainval, X_test, y_test, n_feat):
-    flat_dir = SAVE_ROOT / "flat"
-    seq_dir  = SAVE_ROOT / "seq"
+def save_outputs(X_trainval, y_trainval, X_test, y_test, n_feat, save_root: Path,
+                 feature_mode: str, feature_names: list[str]):
+    flat_dir = save_root / "flat"
+    seq_dir  = save_root / "seq"
     flat_dir.mkdir(parents=True, exist_ok=True)
     seq_dir.mkdir(parents=True, exist_ok=True)
 
@@ -272,14 +284,20 @@ def save_outputs(X_trainval, y_trainval, X_test, y_test, n_feat):
     meta = {
         "dataset": "CTU-13 Scenario 9", "botnet_type": "Neris (IRC-based, 10 bots)",
         "botnet_ips": sorted(BOTNET_IPS),
-        "feature_selection": {"method": "chi2", "n_features": n_feat, "source": "cicids2017"},
+        "feature_selection": {"method": feature_mode, "n_features": n_feat, "source": "cicids2017"},
         "split": {"trainval": int(len(y_trainval)), "test": int(len(y_test)),
                   "trainval_bot_ratio": float(y_trainval.mean()), "test_bot_ratio": float(y_test.mean())},
     }
-    with open(SAVE_ROOT / "meta.json", "w", encoding="utf-8") as fp:
+    with open(save_root / "meta.json", "w", encoding="utf-8") as fp:
         json.dump(meta, fp, indent=4, ensure_ascii=False)
+    with open(save_root / "selected_features.json", "w", encoding="utf-8") as fp:
+        json.dump(
+            {"method": feature_mode, "n_features": n_feat,
+             "indices": list(range(n_feat)), "features": feature_names},
+            fp, indent=4, ensure_ascii=False,
+        )
 
-    print(f"\n[SAVE] {SAVE_ROOT}")
+    print(f"\n[SAVE] {save_root}")
     print(f"  flat/ X_trainval: {X_trainval.shape}")
     print(f"  seq/  X_trainval: {X_trainval.reshape(-1, n_feat, 1).shape}")
 
@@ -288,33 +306,45 @@ def save_outputs(X_trainval, y_trainval, X_test, y_test, n_feat):
 # main
 # =========================================================
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--feature_mode", choices=["selected", "all"], default="all",
+                        help="selected=CIC2017 chi-square 32개, all=CIC2017 all feature")
+    args = parser.parse_args()
+
+    save_root = DEFAULT_SAVE_ROOT if args.feature_mode == "selected" else BASE_DIR / "data" / "processed" / "ctu13_all"
+    feature_cols = ML_FEATURES if args.feature_mode == "selected" else ALL_FEATURES
+    scaler_path = SCALER_PATH if args.feature_mode == "selected" else ALL_SCALER_PATH
+    selected_path = SEL_FEAT_PATH if args.feature_mode == "selected" else ALL_FEAT_PATH
+
     print("=" * 65)
     print("  CTU-13 Scenario 9 전처리  (Chi-square 피처 선택 공유)")
     print("=" * 65)
     print(f"  RAW_CSV    = {RAW_CSV}")
+    print(f"  SAVE_ROOT  = {save_root}")
+    print(f"  feature_mode = {args.feature_mode}")
     print(f"  BOTNET_IPS = {sorted(BOTNET_IPS)}")
     print("=" * 65)
 
     if not RAW_CSV.exists():
         raise FileNotFoundError(f"CSV 없음: {RAW_CSV}")
-    SAVE_ROOT.mkdir(parents=True, exist_ok=True)
+    save_root.mkdir(parents=True, exist_ok=True)
 
     df = load_raw(RAW_CSV)
     df = apply_column_map(df)
     df = assign_labels(df)
-    df = clean_features(df)
+    df = clean_features(df, feature_cols)
     df = apply_log_transform(df)
 
     df_trainval, df_test = split_random(df)
 
-    available = [c for c in ML_FEATURES if c in df.columns]
+    available = [c for c in feature_cols if c in df.columns]
     X_tv = df_trainval[available].values.astype(np.float32)
     y_tv = df_trainval["Label_binary"].values.astype(np.int32)
     X_te = df_test[available].values.astype(np.float32)
     y_te = df_test["Label_binary"].values.astype(np.int32)
 
-    if len(available) < len(ML_FEATURES):
-        missing_count = len(ML_FEATURES) - len(available)
+    if len(available) < len(feature_cols):
+        missing_count = len(feature_cols) - len(available)
         print(f"\n[WARN] 누락 피처 {missing_count}개 → 0으로 패딩")
         X_tv = np.hstack([X_tv, np.zeros((len(X_tv), missing_count), dtype=np.float32)])
         X_te = np.hstack([X_te, np.zeros((len(X_te), missing_count), dtype=np.float32)])
@@ -322,12 +352,19 @@ def main():
     print(f"\n[FLOW] X_trainval: {X_tv.shape}  X_test: {X_te.shape}")
 
     # ① CIC2017 Scaler + ② Secondary Scaler
-    X_tv, X_te = apply_scaler(X_tv, X_te)
+    X_tv, X_te = apply_scaler(X_tv, X_te, scaler_path, save_root)
 
-    # ③ Chi-square 피처 선택 (CIC2017 기준 인덱스 적용)
-    X_tv, X_te, n_feat = apply_feature_selection(X_tv, X_te)
+    if args.feature_mode == "selected":
+        X_tv, X_te, n_feat = apply_feature_selection(X_tv, X_te, selected_path)
+        with open(selected_path, "r", encoding="utf-8") as f:
+            feature_names = json.load(f)["features"]
+    else:
+        with open(selected_path, "r", encoding="utf-8") as f:
+            feature_names = json.load(f)["features"]
+        n_feat = len(feature_names)
+        print(f"\n[ALL] 전체 feature 적용: trainval={X_tv.shape}  test={X_te.shape}")
 
-    save_outputs(X_tv, y_tv, X_te, y_te, n_feat)
+    save_outputs(X_tv, y_tv, X_te, y_te, n_feat, save_root, args.feature_mode, feature_names)
     print("\n[DONE]  다음 단계: train_rf.py --dataset ctu13")
 
 

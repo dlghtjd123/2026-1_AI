@@ -44,11 +44,15 @@ _parser.add_argument("--bot_ratio_factor", type=float, default=10.0,
                      help="학습 시 사용한 봇넷 비율 배수 (정보 표시용)")
 _parser.add_argument("--augment_multiplier", type=float, default=2.0,
                      help="학습 시 사용한 증강 후 Bot 수 목표 배수 (기본값: 2)")
+_parser.add_argument("--feature_mode", type=str, default="all",
+                     choices=["selected", "all"],
+                     help="selected=chi-square 32개, all=전체 feature")
 _args = _parser.parse_args()
 DATASET          = _args.dataset
 AUGMENT          = _args.augment
 BOT_RATIO_FACTOR = _args.bot_ratio_factor
 AUGMENT_MULTIPLIER = _args.augment_multiplier
+FEATURE_MODE = _args.feature_mode
 
 
 # =========================================================
@@ -58,17 +62,20 @@ _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
 _ROOT     = _PROJECT.parent
 
+_DATASET_KEY = f"{DATASET}_all" if FEATURE_MODE == "all" else DATASET
 _MUL_SUFFIX = "" if AUGMENT == "none" or AUGMENT_MULTIPLIER == 2.0 else f"_mul{AUGMENT_MULTIPLIER:g}"
 _MODEL_SUFFIX = f"_{AUGMENT}{_MUL_SUFFIX}" if AUGMENT != "none" else ""
 
-MODEL_DIR  = _ROOT / "artifacts" / f"models_{DATASET}{_MODEL_SUFFIX}"
-RESULT_DIR = _ROOT / "artifacts" / f"results_{DATASET}{_MODEL_SUFFIX}"
+MODEL_DIR  = _ROOT / "artifacts" / f"models_{_DATASET_KEY}{_MODEL_SUFFIX}"
+RESULT_DIR = _ROOT / "artifacts" / f"results_{_DATASET_KEY}{_MODEL_SUFFIX}"
 DATA_ROOT  = _PROJECT / "data" / "processed"
 
 DATASET_DIRS = {
     "cicids2017": (DATA_ROOT / "cicids2017" / "flat", DATA_ROOT / "cicids2017" / "seq"),
+    "cicids2017_all": (DATA_ROOT / "cicids2017_all" / "flat", DATA_ROOT / "cicids2017_all" / "seq"),
     "cicids2018": (DATA_ROOT / "cicids2018" / "flat", DATA_ROOT / "cicids2018" / "seq"),
     "ctu13":      (DATA_ROOT / "ctu13"      / "flat", DATA_ROOT / "ctu13"      / "seq"),
+    "ctu13_all":  (DATA_ROOT / "ctu13_all"  / "flat", DATA_ROOT / "ctu13_all"  / "seq"),
 }
 
 DATASET_DISPLAY = {
@@ -293,12 +300,6 @@ def run_evaluation(flat_dir: Path, seq_dir: Path) -> dict:
     print(f"  flat: {X_flat.shape}  Bot 비율: {y_flat.mean():.4f}")
     print(f"  seq:  {X_seq.shape}   Bot 비율: {y_seq.mean():.4f}")
 
-    rf_model,  rf_thr           = load_sklearn_model("rf_flow")
-    xgb_model, xgb_thr          = load_sklearn_model("xgb_flow")
-    cnn_ckpt,  cnn_thr          = load_torch_checkpoint("cnn_lstm_flow")
-    gru_ckpt,  gru_thr          = load_torch_checkpoint("gru_flow")
-    cnn_gru_ckpt, cnn_gru_thr   = load_torch_checkpoint("cnn_gru_flow")
-
     def eval_sk(model, thr, X, y, name):
         prob  = predict_sklearn_probs(model, X)
         thr_f = float(thr) if thr != "argmax" else 0.5
@@ -315,13 +316,24 @@ def run_evaluation(flat_dir: Path, seq_dir: Path) -> dict:
         m["decision"] = "argmax" if thr == "argmax" else f"{thr_f:.2f}"
         return m
 
-    results = {
-        "rf":       eval_sk(rf_model,  rf_thr,  X_flat, y_flat, "rf"),
-        "xgb":      eval_sk(xgb_model, xgb_thr, X_flat, y_flat, "xgb"),
-        "cnn_lstm": eval_seq(cnn_ckpt,     "cnn_lstm", cnn_thr,     X_seq, y_seq),
-        "gru":      eval_seq(gru_ckpt,     "gru",      gru_thr,     X_seq, y_seq),
-        "cnn_gru":  eval_seq(cnn_gru_ckpt, "cnn_gru",  cnn_gru_thr, X_seq, y_seq),
-    }
+    results = {}
+    for model_key, file_key in [("rf", "rf_flow"), ("xgb", "xgb_flow")]:
+        if _model_path(file_key, "pkl").exists() and _threshold_path(file_key).exists():
+            model, thr = load_sklearn_model(file_key)
+            results[model_key] = eval_sk(model, thr, X_flat, y_flat, model_key)
+        else:
+            print(f"[SKIP] {model_key}: 모델 파일 없음")
+
+    for model_key, file_key, model_type in [
+        ("cnn_lstm", "cnn_lstm_flow", "cnn_lstm"),
+        ("gru", "gru_flow", "gru"),
+        ("cnn_gru", "cnn_gru_flow", "cnn_gru"),
+    ]:
+        if _model_path(file_key, "pt").exists() and _threshold_path(file_key).exists():
+            ckpt, thr = load_torch_checkpoint(file_key)
+            results[model_key] = eval_seq(ckpt, model_type, thr, X_seq, y_seq)
+        else:
+            print(f"[SKIP] {model_key}: 모델 파일 없음")
 
     print_result_table(
         f"{display_name} — Holdout Test [{AUGMENT}]",
@@ -338,6 +350,7 @@ def save_results(results: dict) -> None:
         "dataset":          DATASET,
         "augment":          AUGMENT,
         "augment_multiplier": AUGMENT_MULTIPLIER,
+        "feature_mode":     FEATURE_MODE,
         "primary_metric":   ["f1", "recall"],
         "secondary_metric": "roc_auc",
         "note":             "K-fold로 설정을 선택한 뒤 trainval 전체로 재학습한 최종 모델의 holdout test 평가",
@@ -363,11 +376,12 @@ def main():
     print(f"  학습 bot 비율    = 원본 × {BOT_RATIO_FACTOR:.0f}배 "
           f"({BOT_RATIO_FACTOR:.0f}x 배수)")
     print(f"  증강 목표        = Bot × {AUGMENT_MULTIPLIER:g}")
+    print(f"  feature_mode     = {FEATURE_MODE}")
     print(f"  test set         = 원본 유지 (subsample 없음)")
     print(f"  ★ 주 지표 = F1-score, Recall  /  보조: ROC-AUC")
     print("=" * 72)
 
-    flat_dir, seq_dir = DATASET_DIRS[DATASET]
+    flat_dir, seq_dir = DATASET_DIRS[_DATASET_KEY]
     results = run_evaluation(flat_dir, seq_dir)
     save_results(results)
     print(f"\n[완료] {RESULT_DIR}/eval_results.json")
