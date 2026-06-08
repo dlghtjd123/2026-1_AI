@@ -165,9 +165,34 @@ def _make_wcgan_generator(noise_dim: int, label_dim: int, n_features: int):
     return ConditionalGenerator()
 
 
-def _segment_botnet(X_bot: np.ndarray, n_segments: int = 4) -> list[np.ndarray]:
+def _segment_botnet(
+    X_bot: np.ndarray,
+    n_segments: int = 4,
+    segment_mode: str = "kmeans",
+    feature_names: list[str] | None = None,
+) -> list[np.ndarray]:
     if len(X_bot) < MIN_SEG_SIZE * 2:
         return [X_bot]
+
+    if segment_mode == "dport" and feature_names and "Destination Port" in feature_names:
+        dport_idx = feature_names.index("Destination Port")
+        dport_values = X_bot[:, dport_idx]
+        values, counts = np.unique(dport_values, return_counts=True)
+        order = np.argsort(counts)[::-1]
+        top_values = [
+            values[i] for i in order[: max(1, n_segments - 1)]
+            if counts[i] >= MIN_SEG_SIZE
+        ]
+        segments = [X_bot[dport_values == value] for value in top_values]
+        if top_values:
+            other_mask = ~np.isin(dport_values, np.array(top_values))
+            if np.sum(other_mask) >= MIN_SEG_SIZE:
+                segments.append(X_bot[other_mask])
+        segments = [seg for seg in segments if len(seg) >= MIN_SEG_SIZE]
+        if segments:
+            print(f"    [SEGMENT] Dport-based segments={len(segments)}")
+            return segments
+        print("    [SEGMENT] Dport segment 실패 → KMeans fallback")
 
     try:
         from sklearn.cluster import KMeans
@@ -318,7 +343,8 @@ def _train_fold_wcgan_generator(X_seg: np.ndarray, device, seg_idx: int):
 
 def _cache_path(data_root: Path, dataset: str, augment: str, fold_id: str,
                 n_current: int, n_generate: int, n_features: int,
-                augment_multiplier: float) -> Path:
+                augment_multiplier: float,
+                segment_mode: str = "kmeans") -> Path:
     cache_dir = data_root / f"{dataset}_{augment}_fold_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     train_tag = (
@@ -327,7 +353,7 @@ def _cache_path(data_root: Path, dataset: str, augment: str, fold_id: str,
     )
     return cache_dir / (
         f"{fold_id}_bot{n_current}_gen{n_generate}_feat{n_features}"
-        f"_mul{augment_multiplier:g}_{train_tag}.npy"
+        f"_mul{augment_multiplier:g}_seg{segment_mode}_{train_tag}.npy"
     )
 
 
@@ -368,6 +394,8 @@ def _fold_gan_augment(
     data_root: Path,
     fold_id: str,
     augment_multiplier: float = DEFAULT_AUGMENT_MULTIPLIER,
+    segment_mode: str = "kmeans",
+    feature_names: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     import torch
 
@@ -380,7 +408,7 @@ def _fold_gan_augment(
 
     cache_file = _cache_path(
         data_root, dataset, augment, fold_id, n_current, n_generate, X.shape[1],
-        augment_multiplier,
+        augment_multiplier, segment_mode,
     )
     if cache_file.exists():
         X_fake = np.load(cache_file)
@@ -392,7 +420,11 @@ def _fold_gan_augment(
         np.random.seed(seed)
 
         X_bot = X[y == 1].astype(np.float32)
-        segments = _segment_botnet(X_bot)
+        segments = _segment_botnet(
+            X_bot,
+            segment_mode=segment_mode,
+            feature_names=feature_names,
+        )
         conditional = augment in ("wgan_gp", "wcgan_gp")
         print(f"    [AUG] {augment.upper()}: fold-local Generator 학습 "
               f"(fold={fold_id}, segments={len(segments)}, fake={n_generate:,})")
@@ -544,6 +576,8 @@ def augment_train_fold(
     data_root: Path,
     fold_id: str | int | None = None,
     augment_multiplier: float = DEFAULT_AUGMENT_MULTIPLIER,
+    segment_mode: str = "kmeans",
+    feature_names: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     K-fold 내부에서 train fold에만 증강 적용.
@@ -557,6 +591,8 @@ def augment_train_fold(
         data_root: data/processed 경로
         fold_id:   fold-local GAN/WCGAN 학습 및 캐시 구분자
         augment_multiplier: 증강 후 목표 Bot 수 배수 (예: 2, 5, 10)
+        segment_mode: GAN/WCGAN Bot segment 방식 ('kmeans'/'dport')
+        feature_names: dport segment에 사용할 feature 이름 목록
 
     Returns:
         증강된 X_train, y_train
@@ -576,7 +612,7 @@ def augment_train_fold(
 
     print(f"  [AUG] train: {len(y_train):,}  val: -  "
           f"Bot 비율(원본)={y_train.mean():.6f}  "
-          f"증강 목표={augment_multiplier:g}x")
+          f"증강 목표={augment_multiplier:g}x  segment={segment_mode}")
 
     if augment == "smote":
         X_aug, y_aug = _smote(X_flat, y_train, augment_multiplier=augment_multiplier)
@@ -586,6 +622,8 @@ def augment_train_fold(
             X_flat, y_train, augment, dataset, data_root,
             fold_id=str(fold_id or "unknown"),
             augment_multiplier=augment_multiplier,
+            segment_mode=segment_mode,
+            feature_names=feature_names,
         )
 
     elif augment in ("wgan_gp", "wcgan_gp"):
@@ -593,6 +631,8 @@ def augment_train_fold(
             X_flat, y_train, "wcgan_gp", dataset, data_root,
             fold_id=str(fold_id or "unknown"),
             augment_multiplier=augment_multiplier,
+            segment_mode=segment_mode,
+            feature_names=feature_names,
         )
 
     else:

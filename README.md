@@ -68,6 +68,8 @@ python preprocess_cicids2018.py
 python preprocess_ctu13.py
 ```
 
+현재 기본 전처리 모드는 전체 feature(`all`)이다. 기존 32개 selected feature 실험이 필요하면 각 전처리 스크립트에서 `--feature_mode selected`를 사용한다.
+
 전처리 요약:
 
 | 항목 | 내용 |
@@ -107,6 +109,32 @@ python project/src/run_experiments.py \
   --datasets cicids2017 \
   --augments smote gan wcgan_gp \
   --augment_multiplier 5
+```
+
+논문식 재현에 가까운 설정으로 CIC-IDS2017 전체 feature, Dport 기반 segment, RF/XGBoost만 빠르게 실행:
+
+```bash
+python project/src/preprocess_cicids2017.py
+
+python project/src/run_experiments.py \
+  --datasets cicids2017 \
+  --augments gan wcgan_gp \
+  --models rf xgb \
+  --augment_multipliers 5 25 50 \
+  --threshold_mode fixed
+```
+
+CTU-13도 전체 feature로 실행하려면 먼저 CTU 전처리를 수행한다.
+
+```bash
+python project/src/preprocess_ctu13.py
+
+python project/src/run_experiments.py \
+  --datasets ctu13 \
+  --augments none smote gan wcgan_gp \
+  --models rf xgb cnn_lstm gru cnn_gru \
+  --augment_multipliers 5 25 50 \
+  --threshold_mode fixed
 ```
 
 세 데이터셋 전체 실행:
@@ -246,6 +274,8 @@ fold-local synthetic sample cache:
 ```text
 project/data/processed/{dataset}_{augment}_fold_cache/
 ```
+
+전체 feature + Dport segment 실험에서는 `Destination Port`를 포함한 전체 feature를 사용하고, GAN/WCGAN-GP 학습 시 Botnet 샘플을 목적 포트 기반 segment로 나눈다. 이 설정은 기존 GAN 증강 논문 프로토콜에 더 가까운 추가 실험으로 사용한다.
 
 ---
 
@@ -476,14 +506,20 @@ artifacts/results_{dataset}_{augment}/eval_results.json
 | `train_*.py` | `--max_mismatch` | Botnet 비율 증가 제한, 기본값은 `cicids2017=5`, `cicids2018=2`, `ctu13=2` |
 | `train_*.py` | `--threshold_mode` | `fixed`, `f1_opt` |
 | `train_*.py` | `--augment_multiplier` | 증강 후 Bot 수 목표 배수, 기본값 `2` |
+| `train_*.py` | `--feature_mode` | `selected`, `all`, 기본값 `all` |
+| `train_*.py` | `--segment_mode` | `auto`, `kmeans`, `dport` (`auto`: all feature는 `dport`, selected feature는 `kmeans`) |
 | `evaluate.py` | `--dataset` | 평가 데이터셋 |
 | `evaluate.py` | `--augment` | 평가할 증강 설정 |
 | `evaluate.py` | `--augment_multiplier` | 평가할 모델의 증강 배수 |
+| `evaluate.py` | `--feature_mode` | 평가할 feature 설정, 기본값 `all` |
 | `run_experiments.py` | `--datasets` | 여러 데이터셋 자동 실행 |
 | `run_experiments.py` | `--augments` | 여러 증강 방식 자동 실행 |
 | `run_experiments.py` | `--models` | 실행할 모델 선택 |
 | `run_experiments.py` | `--threshold_mode` | 전체 학습에 threshold 모드 적용 |
 | `run_experiments.py` | `--augment_multiplier` | 전체 학습에 증강 배수 적용 |
+| `run_experiments.py` | `--augment_multipliers` | 여러 증강 배수 반복 실행 |
+| `run_experiments.py` | `--feature_mode` | feature 설정, 기본값 `all` |
+| `run_experiments.py` | `--segment_mode` | GAN/WCGAN Bot segment 방식, 기본값 `auto` |
 | `run_experiments.py` | `--dry_run` | 명령만 출력 |
 | `run_experiments.py` | `--fold_gan_epochs` | fold-local GAN epoch |
 | `run_experiments.py` | `--fold_wcgan_epochs` | fold-local WCGAN-GP epoch |

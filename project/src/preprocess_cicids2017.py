@@ -17,6 +17,7 @@ Chi-square 피처 선택: 77개 → 상위 20개 (Sayegh et al. 2024 동일)
 from __future__ import annotations
 
 import glob
+import argparse
 import json
 import os
 from collections import Counter
@@ -39,8 +40,7 @@ _SRC_DIR  = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR  = os.path.dirname(_SRC_DIR)
 
 RAW_DIR   = os.path.join(BASE_DIR, "data", "raw", "cic-ids2017")
-SAVE_DIR  = os.path.join(BASE_DIR, "data", "processed", "cicids2017")
-os.makedirs(SAVE_DIR, exist_ok=True)
+DEFAULT_SAVE_DIR  = os.path.join(BASE_DIR, "data", "processed", "cicids2017")
 
 # =========================================================
 # Chi-square 피처 선택 설정
@@ -79,6 +79,11 @@ ML_FEATURES = [
     "Active Mean", "Active Std", "Active Max", "Active Min",
     "Idle Mean", "Idle Std", "Idle Max", "Idle Min",
     "Protocol",
+]
+
+ALL_FEATURES = [
+    "Source Port", "Destination Port",
+    *ML_FEATURES,
 ]
 
 LOG_TRANSFORM_FEATURES = [
@@ -241,22 +246,22 @@ def save_numpy(data, label, save_dir, split_name):
 # =========================================================
 # Chi-square 피처 선택
 # =========================================================
-def select_features_chi2(X_tv, y_tv, n_features=N_FEATURES, save_dir=SAVE_DIR):
+def select_features_chi2(X_tv, y_tv, feature_names, n_features=N_FEATURES, save_dir=DEFAULT_SAVE_DIR):
     """
     MinMaxScaler 후 chi-square로 상위 n_features개 선택.
     selected_features.json 저장 → CIC2018/CTU13에서 동일 피처 사용.
     """
-    print(f"\n[CHI2] chi-square 피처 선택: {len(ML_FEATURES)}개 → {n_features}개")
+    print(f"\n[CHI2] chi-square 피처 선택: {len(feature_names)}개 → {n_features}개")
 
     selector = SelectKBest(chi2, k=n_features)
     selector.fit(X_tv, y_tv)
 
     selected_indices = selector.get_support(indices=True).tolist()
-    selected_names   = [ML_FEATURES[i] for i in selected_indices]
+    selected_names   = [feature_names[i] for i in selected_indices]
 
     scores = selector.scores_
     print(f"[CHI2] 선택된 {n_features}개 피처 (점수 높은 순):")
-    top = sorted(zip(scores, ML_FEATURES), reverse=True)[:n_features]
+    top = sorted(zip(scores, feature_names), reverse=True)[:n_features]
     for rank, (score, feat) in enumerate(top, 1):
         print(f"  {rank:2d}. {feat:<42s}  chi2={score:.2f}")
 
@@ -275,16 +280,29 @@ def select_features_chi2(X_tv, y_tv, n_features=N_FEATURES, save_dir=SAVE_DIR):
 # main
 # =========================================================
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--feature_mode", choices=["selected", "all"], default="all",
+                        help="selected=chi-square 32개, all=CICFlowMeter 전체 ML feature")
+    args = parser.parse_args()
+
+    save_dir = (
+        DEFAULT_SAVE_DIR if args.feature_mode == "selected"
+        else os.path.join(BASE_DIR, "data", "processed", "cicids2017_all")
+    )
+    os.makedirs(save_dir, exist_ok=True)
+    feature_cols = ML_FEATURES if args.feature_mode == "selected" else ALL_FEATURES
+
     print("=" * 65)
     print("  CIC-IDS2017 Preprocessing  (Chi-square 피처 선택 포함)")
     print("=" * 65)
     print(f"  RAW_DIR     = {RAW_DIR}")
-    print(f"  SAVE_DIR    = {SAVE_DIR}")
-    print(f"  ML_FEATURES = {len(ML_FEATURES)}개 → chi2 선택 후 {N_FEATURES}개")
+    print(f"  SAVE_DIR    = {save_dir}")
+    print(f"  feature_mode= {args.feature_mode}")
+    print(f"  FEATURES    = {len(feature_cols)}개")
     print("=" * 65)
 
-    FLAT_DIR = os.path.join(SAVE_DIR, "flat")
-    SEQ_DIR  = os.path.join(SAVE_DIR, "seq")
+    FLAT_DIR = os.path.join(save_dir, "flat")
+    SEQ_DIR  = os.path.join(save_dir, "seq")
     for d in [FLAT_DIR, SEQ_DIR]:
         os.makedirs(d, exist_ok=True)
 
@@ -299,8 +317,8 @@ def main():
 
     df_trainval, df_test = split_random(df)
 
-    X_tv, y_tv = create_flow_data(df_trainval, ML_FEATURES)
-    X_te, y_te = create_flow_data(df_test,     ML_FEATURES)
+    X_tv, y_tv = create_flow_data(df_trainval, feature_cols)
+    X_te, y_te = create_flow_data(df_test,     feature_cols)
 
     # MinMaxScaler: trainval fit → [0,1] (chi2 요건)
     scaler = MinMaxScaler()
@@ -311,14 +329,26 @@ def main():
     joblib.dump(scaler, scaler_path)
     print(f"\n[SCALER] 저장: {scaler_path}")
 
-    # Chi-square 피처 선택 (trainval 기준)
-    selected_indices, selected_names = select_features_chi2(X_tv, y_tv)
-
-    X_tv   = X_tv[:, selected_indices].astype(np.float32)
-    X_te   = X_te[:, selected_indices].astype(np.float32)
-    n_feat = N_FEATURES
-
-    print(f"\n[CHI2] 선택 후: trainval={X_tv.shape}  test={X_te.shape}")
+    if args.feature_mode == "selected":
+        selected_indices, selected_names = select_features_chi2(
+            X_tv, y_tv, feature_cols, save_dir=save_dir
+        )
+        X_tv   = X_tv[:, selected_indices].astype(np.float32)
+        X_te   = X_te[:, selected_indices].astype(np.float32)
+        n_feat = N_FEATURES
+        print(f"\n[CHI2] 선택 후: trainval={X_tv.shape}  test={X_te.shape}")
+    else:
+        selected_names = feature_cols
+        n_feat = len(feature_cols)
+        sel_path = os.path.join(save_dir, "selected_features.json")
+        with open(sel_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"method": "all", "n_features": n_feat,
+                 "indices": list(range(n_feat)), "features": selected_names},
+                f, indent=4, ensure_ascii=False,
+            )
+        print(f"\n[ALL] 전체 feature 사용: trainval={X_tv.shape}  test={X_te.shape}")
+        print(f"[ALL] 저장: {sel_path}")
 
     # 저장
     save_numpy(X_tv,                    y_tv, FLAT_DIR, "trainval")
@@ -329,7 +359,7 @@ def main():
     print(f"\n[DONE]")
     print(f"  flat/ X_trainval : {X_tv.shape}")
     print(f"  seq/  X_trainval : {X_tv.reshape(-1,n_feat,1).shape}")
-    print(f"  selected_features.json : {N_FEATURES}개 피처")
+    print(f"  selected_features.json : {n_feat}개 피처")
     print(f"\n[NEXT]  python preprocess_cicids2018.py  /  python preprocess_ctu13.py")
 
 

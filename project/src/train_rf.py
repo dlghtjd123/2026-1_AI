@@ -43,6 +43,12 @@ _parser.add_argument("--threshold_mode", type=str, default="fixed",
                      help="fixed=0.5, f1_opt=validation F1 기준 threshold 선택")
 _parser.add_argument("--augment_multiplier", type=float, default=2.0,
                      help="증강 후 Bot 수 목표 배수 (기본값: 2)")
+_parser.add_argument("--feature_mode", type=str, default="all",
+                     choices=["selected", "all"],
+                     help="selected=chi-square 32개, all=전체 feature")
+_parser.add_argument("--segment_mode", type=str, default="auto",
+                     choices=["auto", "kmeans", "dport"],
+                     help="GAN/WCGAN Bot segment 방식")
 _args = _parser.parse_args()
 AUGMENT      = _args.augment
 DATASET      = _args.dataset
@@ -54,6 +60,10 @@ MAX_MISMATCH = _args.max_mismatch if _args.max_mismatch is not None else (
 )
 THRESHOLD_MODE = _args.threshold_mode
 AUGMENT_MULTIPLIER = _args.augment_multiplier
+FEATURE_MODE = _args.feature_mode
+SEGMENT_MODE = "dport" if _args.segment_mode == "auto" and FEATURE_MODE == "all" else (
+    "kmeans" if _args.segment_mode == "auto" else _args.segment_mode
+)
 
 
 # =========================================================
@@ -63,12 +73,14 @@ _SRC_DIR  = Path(__file__).resolve().parent
 _PROJECT  = _SRC_DIR.parent
 _ROOT     = _PROJECT.parent
 
-DATA_DIR   = _PROJECT / "data" / "processed" / DATASET / "flat"
+_DATASET_KEY = f"{DATASET}_all" if FEATURE_MODE == "all" else DATASET
+DATA_DIR   = _PROJECT / "data" / "processed" / _DATASET_KEY / "flat"
 DATA_ROOT  = _PROJECT / "data" / "processed"
 _MUL_SUFFIX = "" if AUGMENT == "none" or AUGMENT_MULTIPLIER == 2.0 else f"_mul{AUGMENT_MULTIPLIER:g}"
 _MODEL_SUFFIX = f"_{AUGMENT}{_MUL_SUFFIX}" if AUGMENT != "none" else ""
-MODEL_DIR  = _ROOT / "artifacts" / f"models_{DATASET}{_MODEL_SUFFIX}" / "rf"
-RESULT_DIR = _ROOT / "artifacts" / f"results_{DATASET}{_MODEL_SUFFIX}"
+MODEL_DIR  = _ROOT / "artifacts" / f"models_{_DATASET_KEY}{_MODEL_SUFFIX}" / "rf"
+RESULT_DIR = _ROOT / "artifacts" / f"results_{_DATASET_KEY}{_MODEL_SUFFIX}"
+FEATURE_PATH = _PROJECT / "data" / "processed" / _DATASET_KEY / "selected_features.json"
 
 
 # =========================================================
@@ -78,6 +90,13 @@ def load_data(data_dir: Path):
     X = np.load(data_dir / "X_trainval.npy")
     y = np.load(data_dir / "y_trainval.npy").astype(int)
     return X, y
+
+
+def load_feature_names() -> list[str] | None:
+    if not FEATURE_PATH.exists():
+        return None
+    with open(FEATURE_PATH, "r", encoding="utf-8") as f:
+        return json.load(f).get("features")
 
 
 def compute_metrics(y_true, y_pred, y_prob):
@@ -124,6 +143,8 @@ def prepare_train_data(X, y, fold_id=None):
         X, y, AUGMENT, DATASET, DATA_ROOT,
         fold_id=fold_id,
         augment_multiplier=AUGMENT_MULTIPLIER,
+        segment_mode=SEGMENT_MODE,
+        feature_names=load_feature_names(),
     )
     return X, y, y_train_orig
 
@@ -166,6 +187,8 @@ def main():
     print(f"[CONFIG] max_mismatch     : {MAX_MISMATCH:.0f}x  (train/val 봇넷 비율 최대 배수)")
     print(f"[CONFIG] augment_multiplier: {AUGMENT_MULTIPLIER:g}x")
     print(f"[CONFIG] threshold_mode   : {THRESHOLD_MODE}")
+    print(f"[CONFIG] feature_mode     : {FEATURE_MODE}")
+    print(f"[CONFIG] segment_mode     : {SEGMENT_MODE}")
     print(f"[CONFIG] data             : {DATA_DIR}")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -270,6 +293,8 @@ def main():
             "threshold": final_threshold,
             "threshold_mode": THRESHOLD_MODE,
             "augment_multiplier": AUGMENT_MULTIPLIER,
+            "feature_mode": FEATURE_MODE,
+            "segment_mode": SEGMENT_MODE,
             "best_fold_threshold": best_fold_thr,
             "fold_thresholds": fold_thresholds,
             "best_fold": best_fold_idx,
@@ -286,6 +311,8 @@ def main():
         "best_fold":      best_fold_idx,
         "threshold_mode": THRESHOLD_MODE,
         "augment_multiplier": AUGMENT_MULTIPLIER,
+        "feature_mode": FEATURE_MODE,
+        "segment_mode": SEGMENT_MODE,
         "final_threshold": final_threshold,
         "fold_thresholds": fold_thresholds,
         "saved_model":    "final_trainval_refit",

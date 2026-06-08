@@ -13,6 +13,7 @@ run_experiments.py
   python run_experiments.py --datasets cicids2017 --augments gan --fold_gan_epochs 100
   python run_experiments.py --datasets cicids2017 --augments smote --threshold_mode f1_opt
   python run_experiments.py --datasets cicids2017 --augments smote --augment_multiplier 5
+  python run_experiments.py --datasets cicids2017 --augments gan --models rf xgb --feature_mode all --segment_mode dport --augment_multipliers 5 25 50
   python run_experiments.py --dry_run
 """
 
@@ -54,6 +55,14 @@ def parse_args():
                         help="fixed=0.5 기준, f1_opt=fold validation F1 기준 threshold 선택")
     parser.add_argument("--augment_multiplier", type=float, default=2.0,
                         help="증강 후 Bot 수 목표 배수 (기본값: 2)")
+    parser.add_argument("--augment_multipliers", nargs="+", type=float, default=None,
+                        help="여러 증강 배수 자동 실행 예: 5 25 50")
+    parser.add_argument("--feature_mode", type=str, default="all",
+                        choices=["selected", "all"],
+                        help="selected=chi-square 32개, all=전체 feature")
+    parser.add_argument("--segment_mode", type=str, default="auto",
+                        choices=["auto", "kmeans", "dport"],
+                        help="GAN/WCGAN Bot segment 방식 (auto: all=dport, selected=kmeans)")
     parser.add_argument("--fold_gan_epochs", type=int, default=None,
                         help="fold-local GAN epoch override")
     parser.add_argument("--fold_wcgan_epochs", type=int, default=None,
@@ -108,7 +117,7 @@ def resolve_max_mismatch(dataset: str, args) -> float:
     return 2.0
 
 
-def train_command(src_dir: Path, script: str, dataset: str, augment: str, args) -> list[str]:
+def train_command(src_dir: Path, script: str, dataset: str, augment: str, args, multiplier: float) -> list[str]:
     max_mismatch = resolve_max_mismatch(dataset, args)
     cmd = [
         sys.executable,
@@ -119,20 +128,23 @@ def train_command(src_dir: Path, script: str, dataset: str, augment: str, args) 
         "--max_normal", str(args.max_normal),
         "--max_mismatch", str(max_mismatch),
         "--threshold_mode", args.threshold_mode,
-        "--augment_multiplier", str(args.augment_multiplier),
+        "--augment_multiplier", str(multiplier),
+        "--feature_mode", args.feature_mode,
+        "--segment_mode", args.segment_mode,
     ]
     if args.debug:
         cmd.append("--debug")
     return cmd
 
 
-def evaluate_command(src_dir: Path, dataset: str, augment: str, args) -> list[str]:
+def evaluate_command(src_dir: Path, dataset: str, augment: str, args, multiplier: float) -> list[str]:
     return [
         sys.executable,
         str(src_dir / "evaluate.py"),
         "--dataset", dataset,
         "--augment", augment,
-        "--augment_multiplier", str(args.augment_multiplier),
+        "--augment_multiplier", str(multiplier),
+        "--feature_mode", args.feature_mode,
     ]
 
 
@@ -149,6 +161,7 @@ def main():
         env["FOLD_GAN_EPOCHS"] = str(args.fold_gan_epochs)
     if args.fold_wcgan_epochs is not None:
         env["FOLD_WCGAN_EPOCHS"] = str(args.fold_wcgan_epochs)
+    multipliers = args.augment_multipliers or [args.augment_multiplier]
 
     logs_dir = root_dir / "artifacts" / "experiment_runs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -165,7 +178,9 @@ def main():
     print(f"  max_normal       : {args.max_normal}")
     print(f"  max_mismatch     : {args.max_mismatch if args.max_mismatch is not None else 'dataset default (cicids2017=5, cicids2018/ctu13=2)'}")
     print(f"  threshold_mode   : {args.threshold_mode}")
-    print(f"  augment_multiplier: {args.augment_multiplier:g}x")
+    print(f"  augment_multipliers: {[f'{m:g}x' for m in multipliers]}")
+    print(f"  feature_mode     : {args.feature_mode}")
+    print(f"  segment_mode     : {args.segment_mode}")
     print(f"  FOLD_GAN_EPOCHS  : {env.get('FOLD_GAN_EPOCHS', '500')}")
     print(f"  FOLD_WCGAN_EPOCHS: {env.get('FOLD_WCGAN_EPOCHS', '500')}")
     print(f"  dry_run          : {args.dry_run}")
@@ -182,39 +197,36 @@ def main():
     try:
         for dataset in args.datasets:
             for augment in args.augments:
-                print(f"\n{'=' * 72}")
-                print(f"[EXPERIMENT] dataset={dataset} augment={augment}")
-                print(f"{'=' * 72}")
+                run_multipliers = [2.0] if augment == "none" else multipliers
+                for multiplier in run_multipliers:
+                    print(f"\n{'=' * 72}")
+                    print(f"[EXPERIMENT] dataset={dataset} augment={augment} multiplier={multiplier:g}x")
+                    print(f"{'=' * 72}")
 
-                failed = False
-                for model_name in args.models:
-                    cmd = train_command(src_dir, TRAIN_SCRIPTS[model_name], dataset, augment, args)
+                    failed = False
+                    for model_name in args.models:
+                        cmd = train_command(src_dir, TRAIN_SCRIPTS[model_name], dataset, augment, args, multiplier)
+                        entry = run_command(cmd, root_dir, env, args.dry_run)
+                        entry.update({"dataset": dataset, "augment": augment, "augment_multiplier": multiplier, "stage": f"train_{model_name}"})
+                        run_log["commands"].append(entry)
+                        if entry["returncode"] != 0:
+                            failed = True
+                            if not args.continue_on_error:
+                                raise RuntimeError(f"Failed: {entry['command']}")
+                            break
+
+                    if failed:
+                        continue
+
+                    if args.skip_evaluate:
+                        continue
+
+                    cmd = evaluate_command(src_dir, dataset, augment, args, multiplier)
                     entry = run_command(cmd, root_dir, env, args.dry_run)
-                    entry.update({"dataset": dataset, "augment": augment, "stage": f"train_{model_name}"})
+                    entry.update({"dataset": dataset, "augment": augment, "augment_multiplier": multiplier, "stage": "evaluate"})
                     run_log["commands"].append(entry)
-                    if entry["returncode"] != 0:
-                        failed = True
-                        if not args.continue_on_error:
-                            raise RuntimeError(f"Failed: {entry['command']}")
-                        break
-
-                if failed:
-                    continue
-
-                if args.skip_evaluate:
-                    continue
-
-                if not selected_models_cover_evaluation(args.models):
-                    print("[SKIP] evaluate.py는 5개 모델 파일을 모두 필요로 합니다. "
-                          "선택 모델 일부만 실행했으므로 평가를 건너뜁니다.")
-                    continue
-
-                cmd = evaluate_command(src_dir, dataset, augment, args)
-                entry = run_command(cmd, root_dir, env, args.dry_run)
-                entry.update({"dataset": dataset, "augment": augment, "stage": "evaluate"})
-                run_log["commands"].append(entry)
-                if entry["returncode"] != 0 and not args.continue_on_error:
-                    raise RuntimeError(f"Failed: {entry['command']}")
+                    if entry["returncode"] != 0 and not args.continue_on_error:
+                        raise RuntimeError(f"Failed: {entry['command']}")
 
     finally:
         run_log["finished_at"] = datetime.now().isoformat(timespec="seconds")
