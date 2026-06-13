@@ -1,570 +1,277 @@
-# 2026-1_AI
+# CICIDS2017 Botnet Augmentation Experiment
 
-수원대학교 4학년 2026-1학기 AI보안
+수원대학교 2026-1학기 AI보안 프로젝트.
 
-딥러닝 기반 봇넷 탐지 시스템  
-내부 데이터셋 검증 기반 데이터 증강 기법 성능 비교: **None / SMOTE / GAN / WCGAN-GP**
+이 저장소의 현재 실험 목적은 **CICIDS2017 전체 13개 클래스를 다중 분류하면서, 희귀 클래스인 Bot 클래스만 증강했을 때 Bot 탐지 성능이 향상되는지** 확인하는 것이다.
 
----
-
-## 연구 흐름
-
-본 프로젝트는 네트워크 플로우 기반 봇넷 탐지에서 데이터 증강 기법의 효과를 비교한다.
-
-실험은 다음 원칙을 따른다.
+## 연구 방향
 
 ```text
-1. 전체 데이터에서 trainval / holdout test 분리
-2. trainval 내부에서 Stratified K-Fold 검증
-3. 각 fold의 train split에만 Benign subsampling 및 증강 적용
-4. validation fold는 항상 원본 분포 유지
-5. K-Fold로 설정을 선택한 뒤 trainval 전체로 최종 모델 재학습
-6. holdout test set으로 최종 평가
+CICIDS2017 13-class multiclass classification
+증강 대상: Bot class only
+평가 대상: 전체 Macro F1 + Bot Precision/Recall/F1/FNR
+주요 비교: 증강 없음 vs ROS/SMOTE/Borderline-SMOTE/ADASYN/GAN/WGAN-GP
+기본 분류기: Random Forest
 ```
 
-중요: `test` 데이터는 전처리 이후 어떤 학습, 증강, Generator 학습에도 사용하지 않는다.
+현재 결론은 CICIDS2017 Bot 탐지에서는 GAN/WGAN-GP보다 **SMOTE, Borderline-SMOTE, ADASYN 계열의 전통적 오버샘플링이 Bot Recall과 Bot F1 개선에 더 안정적**이라는 쪽이다.
 
----
+## 사용하는 데이터
 
-## 설치
+입력 데이터는 CICIDS2017의 `MachineLearningCSV` 형식 CSV이다. 원본 PCAP 파일은 사용하지 않는다.
 
-### 1. PyTorch CUDA 12.4
-
-```bash
-pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 torchvision==0.21.0+cu124 \
-    --index-url https://download.pytorch.org/whl/cu124
-```
-
-### 2. 나머지 패키지
-
-```bash
-pip install -r requirements.txt
-```
-
----
-
-## 데이터셋 준비
+기본 위치:
 
 ```text
-project/data/raw/
-  cic-ids2017/        CIC-IDS2017 CSV 파일들
-  cic-ids2018/        CSE-CIC-IDS2018 CSV 파일
-  ctu-13/
-    scenario9_raw.csv CTU-13 Scenario 9 CICFlowMeter CSV
+project/data/raw/cic-ids2017/
 ```
 
----
-
-## 전처리
-
-CIC-IDS2017을 먼저 전처리해야 한다.  
-CIC-IDS2017에서 chi-square 피처 선택 결과인 `selected_features.json`을 생성하고, CIC-IDS2018과 CTU-13은 동일한 32개 피처를 사용한다.
-
-```bash
-cd project/src
-
-python preprocess_cicids2017.py
-python preprocess_cicids2018.py
-python preprocess_ctu13.py
-```
-
-현재 기본 전처리 모드는 전체 feature(`all`)이다. 기존 32개 selected feature 실험이 필요하면 각 전처리 스크립트에서 `--feature_mode selected`를 사용한다.
-
-전처리 요약:
-
-| 항목 | 내용 |
-|------|------|
-| 분할 | trainval 80% / test 20% |
-| split 방식 | 랜덤 Stratified split |
-| 피처 선택 | Chi-square |
-| 선택 피처 수 | 32개 |
-| 선택 기준 | CIC-IDS2017 trainval |
-| 스케일링 | MinMaxScaler 기반 [0, 1] |
-
----
-
-## 실험 자동 실행
-
-전체 실험은 [run_experiments.py](project/src/run_experiments.py)로 자동 실행할 수 있다.
-
-```bash
-python project/src/run_experiments.py --datasets cicids2017 --augments none smote gan wcgan_gp
-python project/src/run_experiments.py --datasets cicids2018 --augments none smote gan wcgan_gp
-python project/src/run_experiments.py --datasets ctu13 --augments none smote gan wcgan_gp
-```
-
-validation F1 기준으로 threshold를 최적화해서 실행:
-
-```bash
-python project/src/run_experiments.py \
-  --datasets cicids2017 \
-  --augments none smote gan wcgan_gp \
-  --threshold_mode f1_opt
-```
-
-증강 배수를 바꿔서 실행:
-
-```bash
-python project/src/run_experiments.py \
-  --datasets cicids2017 \
-  --augments smote gan wcgan_gp \
-  --augment_multiplier 5
-```
-
-논문식 재현에 가까운 설정으로 CIC-IDS2017 전체 feature, Dport 기반 segment, RF/XGBoost만 빠르게 실행:
-
-```bash
-python project/src/preprocess_cicids2017.py
-
-python project/src/run_experiments.py \
-  --datasets cicids2017 \
-  --augments gan wcgan_gp \
-  --models rf xgb \
-  --augment_multipliers 5 25 50 \
-  --threshold_mode fixed
-```
-
-CTU-13도 전체 feature로 실행하려면 먼저 CTU 전처리를 수행한다.
-
-```bash
-python project/src/preprocess_ctu13.py
-
-python project/src/run_experiments.py \
-  --datasets ctu13 \
-  --augments none smote gan wcgan_gp \
-  --models rf xgb cnn_lstm gru cnn_gru \
-  --augment_multipliers 5 25 50 \
-  --threshold_mode fixed
-```
-
-세 데이터셋 전체 실행:
-
-```bash
-python project/src/run_experiments.py \
-  --datasets cicids2017 cicids2018 ctu13 \
-  --augments none smote gan wcgan_gp
-```
-
-명령만 확인하고 실제 실행하지 않기:
-
-```bash
-python project/src/run_experiments.py --datasets cicids2017 --augments none --dry_run
-```
-
-특정 모델만 실행:
-
-```bash
-python project/src/run_experiments.py \
-  --datasets cicids2017 \
-  --augments smote \
-  --models rf xgb
-```
-
-단, `evaluate.py`는 5개 모델 파일을 모두 필요로 하므로 일부 모델만 실행하면 평가는 자동으로 건너뛴다.
-
-실행 로그는 다음 위치에 저장된다.
+사용 파일 예시:
 
 ```text
-artifacts/experiment_runs/run_YYYYMMDD_HHMMSS.json
+Monday-WorkingHours.pcap_ISCX.csv
+Tuesday-WorkingHours.pcap_ISCX.csv
+Wednesday-workingHours.pcap_ISCX.csv
+Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv
+Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv
+Friday-WorkingHours-Morning.pcap_ISCX.csv
+Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv
+Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
 ```
 
----
+전처리에서는 중복 feature인 `Fwd Header Length.1`을 제거하여 논문에서 흔히 언급되는 CICIDS2017 기준인 **77개 numeric feature**를 사용한다.
 
-## 수동 실행
-
-자동화 스크립트 대신 개별 실행도 가능하다.
-
-### Baseline
-
-```bash
-cd project/src
-
-python train_rf.py       --dataset cicids2017 --augment none
-python train_xgb.py      --dataset cicids2017 --augment none
-python train_cnn_lstm.py --dataset cicids2017 --augment none
-python train_gru.py      --dataset cicids2017 --augment none
-python train_cnn_gru.py  --dataset cicids2017 --augment none
-
-python evaluate.py --dataset cicids2017 --augment none
-```
-
-threshold 최적화 옵션을 개별 학습에 적용:
-
-```bash
-python train_cnn_lstm.py --dataset cicids2017 --augment smote --threshold_mode f1_opt
-python evaluate.py --dataset cicids2017 --augment smote
-```
-
-증강 배수 옵션을 개별 학습에 적용:
-
-```bash
-python train_cnn_lstm.py --dataset cicids2017 --augment smote --augment_multiplier 5
-python evaluate.py --dataset cicids2017 --augment smote --augment_multiplier 5
-```
-
-### SMOTE
-
-```bash
-python train_rf.py       --dataset cicids2017 --augment smote
-python train_xgb.py      --dataset cicids2017 --augment smote
-python train_cnn_lstm.py --dataset cicids2017 --augment smote
-python train_gru.py      --dataset cicids2017 --augment smote
-python train_cnn_gru.py  --dataset cicids2017 --augment smote
-
-python evaluate.py --dataset cicids2017 --augment smote
-```
-
-### GAN / WCGAN-GP
-
-현재 논문용 실험 설계에서는 GAN/WCGAN-GP Generator를 미리 학습하지 않는다.  
-각 K-Fold의 train split 안에서만 Generator를 학습하고 synthetic Bot 샘플을 생성한다.
-
-```bash
-python train_rf.py       --dataset cicids2017 --augment gan
-python train_xgb.py      --dataset cicids2017 --augment gan
-python train_cnn_lstm.py --dataset cicids2017 --augment gan
-python train_gru.py      --dataset cicids2017 --augment gan
-python train_cnn_gru.py  --dataset cicids2017 --augment gan
-
-python evaluate.py --dataset cicids2017 --augment gan
-```
-
-```bash
-python train_rf.py       --dataset cicids2017 --augment wcgan_gp
-python train_xgb.py      --dataset cicids2017 --augment wcgan_gp
-python train_cnn_lstm.py --dataset cicids2017 --augment wcgan_gp
-python train_gru.py      --dataset cicids2017 --augment wcgan_gp
-python train_cnn_gru.py  --dataset cicids2017 --augment wcgan_gp
-
-python evaluate.py --dataset cicids2017 --augment wcgan_gp
-```
-
----
-
-## 증강 방식
-
-| 방식 | Generator 사전학습 | 적용 위치 | validation 사용 여부 | 목표량 |
-|------|------------------|----------|--------------------|--------|
-| None | 없음 | 없음 | 원본 유지 | 없음 |
-| SMOTE | 없음 | fold train split 내부 | 미사용 | Bot 수 `--augment_multiplier`배 |
-| GAN | fold마다 train split으로 학습 | fold train split 내부 | 미사용 | Bot 수 `--augment_multiplier`배 |
-| WCGAN-GP | fold마다 train split으로 학습 | fold train split 내부 | 미사용 | Bot 수 `--augment_multiplier`배 |
-
-GAN/WCGAN-GP는 논문 실험의 엄밀성을 위해 **fold-local Generator**를 사용한다.
+## 실행 흐름
 
 ```text
-Fold k:
-  train split Bot only -> Generator 학습
-  Generator -> synthetic Bot 생성
-  train split + synthetic Bot -> classifier 학습
-  val split -> 원본 그대로 평가
+1. CICIDS2017 CSV 로드
+2. Label 정리
+   - Web Attack 계열은 Web Attack 하나로 통합
+   - 전체 13개 클래스로 매핑
+3. feature 선택
+   - ID/Timestamp/Label 제거
+   - Fwd Header Length.1 제거
+   - numeric feature만 사용
+4. train/test split
+   - 기본 test_size = 0.4
+   - stratify 적용
+5. train set 기준 MinMaxScaler 학습
+6. feature space 구성
+   - raw: scaled original feature
+   - ae: Autoencoder latent feature, 선택 사항
+7. train set의 Bot 클래스만 목표 개수까지 증강
+8. 증강 train set으로 RF 학습
+9. 원본 test set으로 13-class 평가
+10. summary.csv, results.json, synthetic_diagnostics.csv 저장
 ```
 
-최종 holdout test 평가 전에는 `trainval` 전체만으로 final Generator를 다시 학습하고, final classifier를 재학습한다.
+중요한 점은 **test set은 증강하지 않는다**는 것이다. 증강은 train set의 Bot 클래스에만 적용된다.
 
-기본 증강 배수는 `2`이다. `--augment_multiplier 5`처럼 변경하면 기존 2배 결과를 덮어쓰지 않도록 별도 폴더에 저장된다.
-
-```text
-artifacts/results_cicids2017_smote/       # 기본 2배
-artifacts/results_cicids2017_smote_mul5/  # 5배
-```
-
-fold-local synthetic sample cache:
-
-```text
-project/data/processed/{dataset}_{augment}_fold_cache/
-```
-
-전체 feature + Dport segment 실험에서는 `Destination Port`를 포함한 전체 feature를 사용하고, GAN/WCGAN-GP 학습 시 Botnet 샘플을 목적 포트 기반 segment로 나눈다. 이 설정은 기존 GAN 증강 논문 프로토콜에 더 가까운 추가 실험으로 사용한다.
-
----
-
-## GAN/WCGAN-GP Epoch 설정
-
-CNN-LSTM / GRU / CNN-GRU 분류 모델은 최대 30 epoch로 학습한다.
-
-GAN/WCGAN-GP Generator epoch는 별도 설정이다.
-
-| 항목 | 기본값 |
-|------|--------|
-| `FOLD_GAN_EPOCHS` | 500 |
-| `FOLD_WCGAN_EPOCHS` | 500 |
-
-자동화 스크립트에서 변경:
-
-```bash
-python project/src/run_experiments.py \
-  --datasets cicids2017 \
-  --augments gan wcgan_gp \
-  --fold_gan_epochs 100 \
-  --fold_wcgan_epochs 200
-```
-
-PowerShell 환경변수로 직접 지정:
-
-```powershell
-$env:FOLD_GAN_EPOCHS="100"
-$env:FOLD_WCGAN_EPOCHS="200"
-```
-
-논문 결과에는 사용한 Generator epoch를 반드시 명시한다.
-
----
-
-## Benign Subsampling
-
-학습 시간과 클래스 불균형을 조절하기 위해 train split에만 Benign subsampling을 적용한다.  
-Botnet 샘플은 제거하지 않는다.
-
-| 인자 | 의미 | 기본값 |
-|------|------|--------|
-| `--max_normal` | fold당 최대 Benign 샘플 수 | `500000` |
-| `--max_mismatch` | train Botnet 비율이 원본보다 커질 수 있는 최대 배수 | `cicids2017=5.0`, `cicids2018=2.0`, `ctu13=2.0` |
-
-동작:
-
-```text
-1. K-Fold로 train / val 분리
-2. train split에서 Botnet은 모두 유지
-3. train split에서 Benign만 subsampling
-4. train Botnet 비율이 원본 비율의 max_mismatch배를 넘지 않도록 제한
-5. val split은 원본 분포 그대로 유지
-```
-
----
-
-## 클래스 불균형 처리
-
-증강을 사용하지 않을 때는 모델 내부의 불균형 보정을 사용한다.  
-증강을 사용할 때는 이중 보정을 피하기 위해 내부 보정을 비활성화한다.
-
-| 모델 | Baseline | 증강 사용 시 |
-|------|----------|-------------|
-| RF | `class_weight="balanced_subsample"` | `class_weight=None` |
-| XGBoost | `scale_pos_weight=sqrt(neg/pos)` | `scale_pos_weight=1.0` |
-| CNN-LSTM / GRU / CNN-GRU | Focal Loss | CrossEntropyLoss |
-
----
-
-## 학습 및 평가 방식
-
-### K-Fold 검증
-
-| 항목 | 내용 |
-|------|------|
-| 방식 | `StratifiedKFold` |
-| 기본 fold 수 | 5 |
-| split 대상 | trainval |
-| subsampling | train split only |
-| augmentation | train split only |
-| validation fold | 원본 유지 |
-| 보고 지표 | fold 평균, 표준편차, 최소, 최대 |
-
-### 최종 모델
-
-K-Fold 모델 자체를 test에 사용하지 않는다.
-
-```text
-K-Fold:
-  설정 선택용
-  예: best epoch, XGBoost best n_estimators
-
-Final training:
-  trainval 전체로 최종 모델 재학습
-
-Final evaluation:
-  holdout test set으로 평가
-```
-
-이 방식은 best fold 모델을 그대로 test에 사용하는 낙관적 평가를 피하기 위한 것이다.
-
-### 평가 지표
-
-| 지표 | 용도 |
-|------|------|
-| F1-score | 주 지표 |
-| Recall | 주 지표, 봇넷 미탐지 감소 |
-| Precision | 보조 지표 |
-| ROC-AUC | 보조 지표 |
-| Accuracy | 참고 지표 |
-
-### Threshold 설정
-
-기본값은 기존 논문들과 비교하기 쉬운 `fixed` 모드이다.
-
-| 모드 | 의미 | 사용 목적 |
-|------|------|----------|
-| `fixed` | threshold 0.5 고정 | 기본 비교 실험 |
-| `f1_opt` | 각 fold validation set에서 F1이 최대가 되는 threshold 선택 | threshold 민감도 / 추가 분석 |
-
-`f1_opt`는 test set을 보지 않고 validation fold에서만 threshold를 선택한다.  
-최종 holdout test 평가에는 fold별 최적 threshold의 평균값을 사용한다.
-
-논문 본문에서는 `fixed` 결과를 주 결과로 두고, `f1_opt` 결과는 threshold 보정 후 성능 변화 또는 추가 실험으로 분리해 보고하는 것을 권장한다.
-
----
-
-## 모델 목록
-
-| 모델 | 파일 | 입력 |
-|------|------|------|
-| Random Forest | `train_rf.py` | `flat/` `(n, 32)` |
-| XGBoost | `train_xgb.py` | `flat/` `(n, 32)` |
-| CNN-LSTM | `train_cnn_lstm.py` | `seq/` `(n, 32, 1)` |
-| GRU | `train_gru.py` | `seq/` `(n, 32, 1)` |
-| CNN-GRU | `train_cnn_gru.py` | `seq/` `(n, 32, 1)` |
-
----
-
-## 주요 스크립트
+## 주요 코드
 
 | 파일 | 역할 |
-|------|------|
-| `preprocess_cicids2017.py` | CIC-IDS2017 전처리 및 chi-square 피처 선택 |
-| `preprocess_cicids2018.py` | CIC-IDS2018 전처리 |
-| `preprocess_ctu13.py` | CTU-13 전처리 |
-| `augment_utils.py` | fold-local SMOTE/GAN/WCGAN-GP 증강 |
-| `train_rf.py` | RF K-Fold 검증 및 final refit |
-| `train_xgb.py` | XGBoost K-Fold 검증 및 final refit |
-| `train_cnn_lstm.py` | CNN-LSTM K-Fold 검증 및 final refit |
-| `train_gru.py` | GRU K-Fold 검증 및 final refit |
-| `train_cnn_gru.py` | CNN-GRU K-Fold 검증 및 final refit |
-| `evaluate.py` | holdout test 평가 |
-| `run_experiments.py` | 전체 실험 자동화 |
-| `visualize.py` | 결과 시각화 |
+|---|---|
+| `project/src/train_cicids2017_bot_aug.py` | 현재 메인 실행 파일 |
+| `project/src/run_cicids2017_ae_cgan_bot_multiclass.py` | 전체 실험 루프, 인자 처리, 결과 저장 |
+| `project/src/preprocess_cicids2017_bot_multiclass.py` | CSV 로드, 라벨 정리, feature 선택, 전처리 |
+| `project/src/evaluate_cicids2017_bot_multiclass.py` | RF 학습 및 성능 평가 함수 |
+| `project/src/cicids2017_bot_constants.py` | 경로, 클래스명, 공통 상수 |
+| `project/src/train_autoencoder_bot.py` | Autoencoder 학습 및 latent feature 추출 |
+| `project/src/train_ros.py` | Random Oversampling |
+| `project/src/train_smote.py` | SMOTE |
+| `project/src/train_borderline_smote.py` | Borderline-SMOTE |
+| `project/src/train_adasyn.py` | ADASYN |
+| `project/src/train_gan_aug.py` | GAN 기반 Bot 생성 |
+| `project/src/train_wgan_gp.py` | WGAN-GP 기반 Bot 생성 |
+| `project/src/train_cicids2017_bot_method.py` | 증강 방식별 단독 실행 공통 launcher |
+| `project/src/visualize_cicids2017_bot_aug.py` | `summary.csv`를 막대그래프로 시각화 |
 
-`augment_gan.py`, `augment_wcgan_gp.py`는 사전학습 Generator 방식의 보조 스크립트로 남아 있으나, 현재 논문용 실험 경로는 `augment_utils.py`의 fold-local Generator 학습을 사용한다.
+## 기본 실행
 
----
+PowerShell에서는 줄바꿈 기호로 `\`가 아니라 백틱 `` ` `` 을 사용한다.
 
-## 저장 구조
-
-```text
-artifacts/
-  models_{dataset}/
-  models_{dataset}_smote/
-  models_{dataset}_gan/
-  models_{dataset}_wcgan_gp/
-
-  results_{dataset}/
-  results_{dataset}_smote/
-  results_{dataset}_gan/
-  results_{dataset}_wcgan_gp/
-
-  experiment_runs/
-    run_YYYYMMDD_HHMMSS.json
-
-project/data/processed/
-  cicids2017/
-    flat/
-      X_trainval.npy
-      y_trainval.npy
-      X_test.npy
-      y_test.npy
-    seq/
-      X_trainval.npy
-      y_trainval.npy
-      X_test.npy
-      y_test.npy
-      scaler_flow.pkl
-    selected_features.json
-
-  cicids2017_gan_fold_cache/
-  cicids2017_wcgan_gp_fold_cache/
+```powershell
+python project/src/train_cicids2017_bot_aug.py `
+  --augments none ros smote borderline_smote adasyn gan wgan_gp `
+  --feature_spaces raw `
+  --test_size 0.4 `
+  --preprocess paper `
+  --models rf `
+  --gan_epochs 100 `
+  --wgan_epochs 100 `
+  --target_bot_count 10000 `
+  --rf_estimators 100
 ```
 
-모델 저장 파일은 final trainval refit 모델이다.  
-각 모델의 threshold JSON에는 `saved_model: final_trainval_refit`가 기록된다.
+## 증강량별 실행
 
----
+Bot train 개수를 3,000개까지 늘리는 실험:
+
+```powershell
+python project/src/train_cicids2017_bot_aug.py `
+  --augments none ros smote borderline_smote adasyn gan wgan_gp `
+  --feature_spaces raw `
+  --test_size 0.4 `
+  --preprocess paper `
+  --models rf `
+  --gan_epochs 100 `
+  --wgan_epochs 100 `
+  --target_bot_count 3000 `
+  --rf_estimators 100
+```
+
+5,000 / 20,000 / 50,000 실험은 `--target_bot_count`만 바꾸면 된다.
+
+```powershell
+--target_bot_count 5000
+--target_bot_count 20000
+--target_bot_count 50000
+```
+
+## 빠른 확인용 실행
+
+전체 데이터로 돌리기 전에 코드가 정상 동작하는지만 빠르게 확인할 때 사용한다.
+
+```powershell
+python project/src/train_cicids2017_bot_aug.py `
+  --augments none smote `
+  --feature_spaces raw `
+  --test_size 0.4 `
+  --preprocess paper `
+  --models rf `
+  --max_rows 200000 `
+  --target_bot_count 3000 `
+  --rf_estimators 30
+```
+
+## Autoencoder 포함 실행
+
+최종 분석은 raw feature 중심이지만, 논문식 AE 압축을 비교하려면 `ae`를 추가한다.
+
+```powershell
+python project/src/train_cicids2017_bot_aug.py `
+  --augments none ros smote borderline_smote adasyn gan wgan_gp `
+  --feature_spaces raw ae `
+  --test_size 0.4 `
+  --preprocess paper `
+  --models rf `
+  --latent_dim 40 `
+  --ae_epochs 20 `
+  --gan_epochs 100 `
+  --wgan_epochs 100 `
+  --target_bot_count 10000 `
+  --rf_estimators 100
+```
+
+## 옵션 설명
+
+| 옵션 | 의미 |
+|---|---|
+| `--augments` | 비교할 증강 방식 목록 |
+| `--feature_spaces` | `raw`는 scaled original feature, `ae`는 Autoencoder latent feature |
+| `--test_size` | test set 비율 |
+| `--preprocess paper` | 논문식에 가깝게 log1p 없이 MinMax scaling 사용 |
+| `--models rf` | Random Forest 사용 |
+| `--gan_epochs` | GAN 학습 epoch 수 |
+| `--wgan_epochs` | WGAN-GP 학습 epoch 수 |
+| `--target_bot_count` | train set Bot 클래스의 목표 개수 |
+| `--rf_estimators` | Random Forest tree 개수 |
+| `--max_rows` | 디버깅용 row 수 제한 |
 
 ## 결과 파일
 
-K-Fold 결과:
+실행 결과는 아래 경로에 저장된다.
 
 ```text
-artifacts/results_{dataset}_{augment}/{model}_flow_kfold_results.json
+artifacts/ae_cgan_bot_multiclass/run_YYYYMMDD_HHMMSS/
 ```
 
-최종 holdout test 결과:
+주요 파일:
+
+| 파일 | 내용 |
+|---|---|
+| `summary.csv` | 실험별 핵심 metric 표 |
+| `results.json` | classification report, confusion matrix 포함 상세 결과 |
+| `synthetic_diagnostics.csv` | GAN/WGAN-GP 생성 데이터 품질 진단 |
+| `features.json` | 사용 feature 목록 |
+| `*.pkl` | 학습된 scaler/model |
+| `autoencoder.pt` | AE 사용 시 저장되는 autoencoder |
+
+## 결과 시각화
+
+가장 최근 실행 결과를 자동으로 찾아 RF/raw 기준 막대그래프를 생성한다.
+
+```powershell
+python project/src/visualize_cicids2017_bot_aug.py
+```
+
+특정 실행 폴더를 지정하려면:
+
+```powershell
+python project/src/visualize_cicids2017_bot_aug.py `
+  --run_dir artifacts/ae_cgan_bot_multiclass/run_20260612_183021
+```
+
+특정 `summary.csv`를 직접 지정하려면:
+
+```powershell
+python project/src/visualize_cicids2017_bot_aug.py `
+  --summary_csv artifacts/ae_cgan_bot_multiclass/run_20260612_183021/summary.csv
+```
+
+AE 결과를 그리려면 feature space를 바꾼다.
+
+```powershell
+python project/src/visualize_cicids2017_bot_aug.py `
+  --feature_space ae_latent
+```
+
+그래프는 실행 폴더의 `figures/` 아래에 저장된다.
 
 ```text
-artifacts/results_{dataset}_{augment}/eval_results.json
+figures/
+  rf_scaled_original_macro_f1.png
+  rf_scaled_original_bot_f1.png
+  rf_scaled_original_bot_recall.png
+  rf_scaled_original_bot_fnr.png
+  rf_scaled_original_bot_precision_recall_f1.png
+  rf_scaled_original_macro_f1_bot_f1_fnr.png
 ```
 
----
+## 대표 결과 해석
 
-## 인자 정리
+10,000개 목표 실험 기준 대표 결과:
 
-| 스크립트 | 인자 | 선택값 / 의미 |
-|---------|------|---------------|
-| `train_*.py` | `--dataset` | `cicids2017`, `cicids2018`, `ctu13` |
-| `train_*.py` | `--augment` | `none`, `smote`, `gan`, `wcgan_gp` |
-| `train_*.py` | `--n_folds` | K-Fold 수, 기본값 5 |
-| `train_*.py` | `--debug` | 디버그 로그 출력 |
-| `train_*.py` | `--max_normal` | 최대 Benign 수 |
-| `train_*.py` | `--max_mismatch` | Botnet 비율 증가 제한, 기본값은 `cicids2017=5`, `cicids2018=2`, `ctu13=2` |
-| `train_*.py` | `--threshold_mode` | `fixed`, `f1_opt` |
-| `train_*.py` | `--augment_multiplier` | 증강 후 Bot 수 목표 배수, 기본값 `2` |
-| `train_*.py` | `--feature_mode` | `selected`, `all`, 기본값 `all` |
-| `train_*.py` | `--segment_mode` | `auto`, `kmeans`, `dport` (`auto`: all feature는 `dport`, selected feature는 `kmeans`) |
-| `evaluate.py` | `--dataset` | 평가 데이터셋 |
-| `evaluate.py` | `--augment` | 평가할 증강 설정 |
-| `evaluate.py` | `--augment_multiplier` | 평가할 모델의 증강 배수 |
-| `evaluate.py` | `--feature_mode` | 평가할 feature 설정, 기본값 `all` |
-| `run_experiments.py` | `--datasets` | 여러 데이터셋 자동 실행 |
-| `run_experiments.py` | `--augments` | 여러 증강 방식 자동 실행 |
-| `run_experiments.py` | `--models` | 실행할 모델 선택 |
-| `run_experiments.py` | `--threshold_mode` | 전체 학습에 threshold 모드 적용 |
-| `run_experiments.py` | `--augment_multiplier` | 전체 학습에 증강 배수 적용 |
-| `run_experiments.py` | `--augment_multipliers` | 여러 증강 배수 반복 실행 |
-| `run_experiments.py` | `--feature_mode` | feature 설정, 기본값 `all` |
-| `run_experiments.py` | `--segment_mode` | GAN/WCGAN Bot segment 방식, 기본값 `auto` |
-| `run_experiments.py` | `--dry_run` | 명령만 출력 |
-| `run_experiments.py` | `--fold_gan_epochs` | fold-local GAN epoch |
-| `run_experiments.py` | `--fold_wcgan_epochs` | fold-local WCGAN-GP epoch |
+| Augment | Macro F1 | Bot Precision | Bot Recall | Bot F1 | Bot FNR |
+|---|---:|---:|---:|---:|---:|
+| none | 0.9618 | 0.8470 | 0.6196 | 0.7157 | 0.3804 |
+| ROS | 0.9683 | 0.7921 | 0.8142 | 0.8030 | 0.1858 |
+| SMOTE | 0.9690 | 0.7492 | 0.8817 | 0.8101 | 0.1183 |
+| Borderline-SMOTE | 0.9687 | 0.7282 | 0.9033 | 0.8064 | 0.0967 |
+| ADASYN | 0.9694 | 0.7369 | 0.9122 | 0.8152 | 0.0878 |
+| GAN | 0.9571 | 0.8247 | 0.5445 | 0.6559 | 0.4555 |
+| WGAN-GP | 0.9546 | 0.8218 | 0.4987 | 0.6207 | 0.5013 |
 
----
-
-## 시각화
-
-```bash
-cd project/src
-
-python visualize.py
-python visualize.py --augment smote
-python visualize.py --augment gan
-python visualize.py --augment wcgan_gp
-python visualize.py --augment smote --augment_multiplier 5
-```
-
-증강 방식별 F1 비교 그림은 어떤 `--augment`로 실행해도 함께 생성된다.
+해석:
 
 ```text
-artifacts/figures_augmentation_compare/01_f1_by_augmentation_dataset.png
-artifacts/figures_augmentation_compare/02_delta_f1_by_augmentation.png
-artifacts/figures_augmentation_compare_mul5/01_f1_by_augmentation_dataset.png
+증강 없음 대비 전통적 오버샘플링은 Bot Recall과 Bot F1을 크게 개선했다.
+특히 ADASYN은 Bot FNR을 0.3804에서 0.0878까지 낮췄다.
+반면 GAN/WGAN-GP는 생성 데이터 품질 문제가 있어 Bot Recall과 Bot F1이 낮았다.
 ```
 
----
+20,000개와 50,000개까지 늘리면 Bot Recall은 더 올라갈 수 있지만, Precision이 떨어져 Bot F1 개선이 제한된다. 따라서 현재 결과에서는 **10,000개 또는 5,000개 수준이 성능 균형이 가장 좋다**고 볼 수 있다.
 
-## 데이터셋 정보
+## 생성 데이터 품질 진단
 
-| 데이터셋 | 봇넷 유형 | 비고 |
-|---------|----------|------|
-| CIC-IDS2017 | Neris IRC | 내부 기준 피처 선택 데이터셋 |
-| CSE-CIC-IDS2018 | Ares, Zeus 계열 | CIC2017 선택 피처와 정렬 |
-| CTU-13 Scenario 9 | Neris IRC | CICFlowMeter 기반 변환 |
+`synthetic_diagnostics.csv`에서 주로 보는 항목:
 
-실제 Botnet 비율은 사용한 원본 파일, 전처리 방식, split 결과에 따라 달라질 수 있다.
+| 항목 | 의미 |
+|---|---|
+| `real_fake_auc` | 진짜 Bot과 생성 Bot을 별도 분류기가 얼마나 쉽게 구분하는지 |
+| `fake_to_real_nn_mean` | 생성 Bot이 실제 Bot과 평균적으로 얼마나 가까운지 |
+| `fake_self_nn_ratio` | 생성 Bot끼리 뭉쳐 있는 정도 |
+| `mean_abs_mean_diff` | 실제 Bot과 생성 Bot의 feature 평균 차이 |
+| `mean_std_ratio` | 실제 Bot 대비 생성 Bot의 분산 비율 |
 
----
-
-## 주요 참고 문헌
-
-- D'Hooge et al. (2020). "Inter-dataset generalization strength of supervised machine learning methods for intrusion detection." *Journal of Information Security and Applications*, 54.
-- Zhao et al. (2024). "Enhancing Network Intrusion Detection Performance using Generative Adversarial Networks." *arXiv:2404.07464*.
-- Sayegh et al. (2024). "Enhanced Intrusion Detection with LSTM-Based Model, Feature Selection, and SMOTE for Imbalanced Data." *Applied Sciences*, 14(2), 479.
-- de Nascimento & Hou (2025). "Uncertainty-Aware Adaptive IDS Using Hybrid CNN-LSTM with cWGAN-GP." *MDPI Safety*, 11(4), 120.
-- Lin et al. (2017). "Focal Loss for Dense Object Detection." *ICCV 2017*.
-- Garcia et al. (2014). "An empirical comparison of botnet detection methods." *Computers & Security*, 45.
+GAN의 `real_fake_auc`가 1.0에 가까우면 생성 Bot이 실제 Bot과 쉽게 구분된다는 뜻이다. 이 경우 증강 데이터가 분류기에 좋은 일반화 정보를 주기보다 오히려 Bot 결정 경계를 흐릴 수 있다.
