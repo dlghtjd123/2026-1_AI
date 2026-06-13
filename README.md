@@ -71,27 +71,27 @@ Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
 
 | 파일 | 역할 |
 |---|---|
-| `project/src/train_cicids2017_bot_aug.py` | 현재 메인 실행 파일 |
-| `project/src/run_cicids2017_ae_cgan_bot_multiclass.py` | 전체 실험 루프, 인자 처리, 결과 저장 |
-| `project/src/preprocess_cicids2017_bot_multiclass.py` | CSV 로드, 라벨 정리, feature 선택, 전처리 |
-| `project/src/evaluate_cicids2017_bot_multiclass.py` | RF 학습 및 성능 평가 함수 |
-| `project/src/cicids2017_bot_constants.py` | 경로, 클래스명, 공통 상수 |
-| `project/src/train_autoencoder_bot.py` | Autoencoder 학습 및 latent feature 추출 |
-| `project/src/train_ros.py` | Random Oversampling |
-| `project/src/train_smote.py` | SMOTE |
-| `project/src/train_borderline_smote.py` | Borderline-SMOTE |
-| `project/src/train_adasyn.py` | ADASYN |
-| `project/src/train_gan_aug.py` | GAN 기반 Bot 생성 |
-| `project/src/train_wgan_gp.py` | WGAN-GP 기반 Bot 생성 |
-| `project/src/train_cicids2017_bot_method.py` | 증강 방식별 단독 실행 공통 launcher |
-| `project/src/visualize_cicids2017_bot_aug.py` | `summary.csv`를 막대그래프로 시각화 |
+| `project/src/run_bot_augmentation_experiment.py` | 전체 실험 CLI 실행 파일 |
+| `project/src/bot_augmentation_experiment.py` | 전체 실험 루프, 인자 처리, 결과 저장 |
+| `project/src/cicids2017_preprocessing.py` | CSV 로드, 라벨 정리, feature 선택, 전처리 |
+| `project/src/rf_evaluation.py` | Random Forest 학습 및 성능 평가 함수 |
+| `project/src/cicids2017_bot_config.py` | 경로, 클래스명, 공통 상수 |
+| `project/src/autoencoder_features.py` | Autoencoder 학습 및 latent feature 추출 |
+| `project/src/augment_ros.py` | Random Oversampling 증강 |
+| `project/src/augment_smote.py` | SMOTE 증강 |
+| `project/src/augment_borderline_smote.py` | Borderline-SMOTE 증강 |
+| `project/src/augment_adasyn.py` | ADASYN 증강 |
+| `project/src/augment_gan.py` | GAN 기반 Bot 증강 |
+| `project/src/augment_wgan_gp.py` | WGAN-GP 기반 Bot 증강 |
+| `project/src/run_single_augmentation_method.py` | 증강 방식별 단독 실행 공통 launcher |
+| `project/src/plot_bot_augmentation_results.py` | `summary.csv`를 막대그래프로 시각화 |
 
 ## 기본 실행
 
 PowerShell에서는 줄바꿈 기호로 `\`가 아니라 백틱 `` ` `` 을 사용한다.
 
 ```powershell
-python project/src/train_cicids2017_bot_aug.py `
+python project/src/run_bot_augmentation_experiment.py `
   --augments none ros smote borderline_smote adasyn gan wgan_gp `
   --feature_spaces raw `
   --test_size 0.4 `
@@ -108,7 +108,7 @@ python project/src/train_cicids2017_bot_aug.py `
 Bot train 개수를 3,000개까지 늘리는 실험:
 
 ```powershell
-python project/src/train_cicids2017_bot_aug.py `
+python project/src/run_bot_augmentation_experiment.py `
   --augments none ros smote borderline_smote adasyn gan wgan_gp `
   --feature_spaces raw `
   --test_size 0.4 `
@@ -133,7 +133,7 @@ python project/src/train_cicids2017_bot_aug.py `
 전체 데이터로 돌리기 전에 코드가 정상 동작하는지만 빠르게 확인할 때 사용한다.
 
 ```powershell
-python project/src/train_cicids2017_bot_aug.py `
+python project/src/run_bot_augmentation_experiment.py `
   --augments none smote `
   --feature_spaces raw `
   --test_size 0.4 `
@@ -149,7 +149,7 @@ python project/src/train_cicids2017_bot_aug.py `
 최종 분석은 raw feature 중심이지만, 논문식 AE 압축을 비교하려면 `ae`를 추가한다.
 
 ```powershell
-python project/src/train_cicids2017_bot_aug.py `
+python project/src/run_bot_augmentation_experiment.py `
   --augments none ros smote borderline_smote adasyn gan wgan_gp `
   --feature_spaces raw ae `
   --test_size 0.4 `
@@ -202,27 +202,27 @@ artifacts/ae_cgan_bot_multiclass/run_YYYYMMDD_HHMMSS/
 가장 최근 실행 결과를 자동으로 찾아 RF/raw 기준 막대그래프를 생성한다.
 
 ```powershell
-python project/src/visualize_cicids2017_bot_aug.py
+python project/src/plot_bot_augmentation_results.py
 ```
 
 특정 실행 폴더를 지정하려면:
 
 ```powershell
-python project/src/visualize_cicids2017_bot_aug.py `
+python project/src/plot_bot_augmentation_results.py `
   --run_dir artifacts/ae_cgan_bot_multiclass/run_20260612_183021
 ```
 
 특정 `summary.csv`를 직접 지정하려면:
 
 ```powershell
-python project/src/visualize_cicids2017_bot_aug.py `
+python project/src/plot_bot_augmentation_results.py `
   --summary_csv artifacts/ae_cgan_bot_multiclass/run_20260612_183021/summary.csv
 ```
 
 AE 결과를 그리려면 feature space를 바꾼다.
 
 ```powershell
-python project/src/visualize_cicids2017_bot_aug.py `
+python project/src/plot_bot_augmentation_results.py `
   --feature_space ae_latent
 ```
 

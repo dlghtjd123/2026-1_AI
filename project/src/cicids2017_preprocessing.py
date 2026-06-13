@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cicids2017_bot_constants import (
+from cicids2017_bot_config import (
     CLASS_NAMES,
     CLASS_TO_ID,
     ID_COLUMNS,

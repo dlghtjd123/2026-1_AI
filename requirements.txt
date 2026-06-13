@@ -1,28 +1,16 @@
-# Core
+# Core data processing
 numpy==1.26.4
 pandas==2.2.2
 
-# ML
+# Machine learning
 scikit-learn==1.4.2
-xgboost==2.0.3
-
-# Deep Learning (CUDA 12.4)
-imbalanced-learn
-
-# torch, torchaudio, torchvision은 위 방법으로 별도 설치
-torch==2.6.0+cu124
-torchaudio==2.6.0+cu124
-torchvision==0.21.0+cu124
-
-# Utils
+imbalanced-learn==0.12.3
 joblib==1.4.2
-tqdm==4.66.4
-pyarrow==16.1.0
+
+# Deep learning
+# CUDA 12.4 wheels require the PyTorch index URL below.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
 
 # Visualization
 matplotlib==3.8.4
-seaborn==0.13.2
-
-# CICFlowMeter
-cicflowmeter
-nfstream

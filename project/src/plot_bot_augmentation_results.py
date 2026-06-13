@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from cicids2017_bot_constants import OUT_DIR
+from cicids2017_bot_config import OUT_DIR
 
 
 AUGMENT_ORDER = [

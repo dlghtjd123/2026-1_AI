@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 
-from run_cicids2017_ae_cgan_bot_multiclass import parse_args, run_training
+from bot_augmentation_experiment import parse_args, run_training
 
 
 def main(default_augment: str) -> None:

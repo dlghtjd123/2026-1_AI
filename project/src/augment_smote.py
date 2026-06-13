@@ -27,7 +27,7 @@ def augment_smote(
 
 
 def main() -> None:
-    from train_cicids2017_bot_method import main as run_method
+    from run_single_augmentation_method import main as run_method
 
     if "--augments" not in sys.argv:
         sys.argv.extend(["--augments", "smote"])

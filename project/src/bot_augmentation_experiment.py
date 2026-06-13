@@ -1,5 +1,5 @@
 """
-run_cicids2017_ae_cgan_bot_multiclass.py
+bot_augmentation_experiment.py
 
 Fast no-K-fold reproduction-style experiment inspired by AE-CGAN IDS.
 
@@ -33,26 +33,26 @@ from sklearn.model_selection import train_test_split
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MinMaxScaler
 
-from cicids2017_bot_constants import (
+from cicids2017_bot_config import (
     BOT_CLASS_ID,
     CLASS_NAMES,
     OUT_DIR,
     RANDOM_STATE,
 )
-from evaluate_cicids2017_bot_multiclass import evaluate_rf
-from preprocess_cicids2017_bot_multiclass import (
+from rf_evaluation import evaluate_rf
+from cicids2017_preprocessing import (
     clean_features,
     infer_feature_columns,
     load_cicids2017,
     stratified_debug_sample,
 )
-from train_autoencoder_bot import Autoencoder, encode_features, train_autoencoder
-from train_adasyn import augment_adasyn
-from train_borderline_smote import augment_borderline_smote
-from train_gan_aug import augment_gan
-from train_ros import augment_ros
-from train_smote import augment_smote
-from train_wgan_gp import augment_wgan_gp
+from autoencoder_features import Autoencoder, encode_features, train_autoencoder
+from augment_adasyn import augment_adasyn
+from augment_borderline_smote import augment_borderline_smote
+from augment_gan import augment_gan
+from augment_ros import augment_ros
+from augment_smote import augment_smote
+from augment_wgan_gp import augment_wgan_gp
 
 
 def parse_args() -> argparse.Namespace:

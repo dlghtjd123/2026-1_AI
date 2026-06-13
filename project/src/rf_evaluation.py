@@ -11,7 +11,7 @@ from sklearn.metrics import (
     recall_score,
 )
 
-from cicids2017_bot_constants import BOT_CLASS_ID, CLASS_NAMES
+from cicids2017_bot_config import BOT_CLASS_ID, CLASS_NAMES
 
 
 def compute_bot_metrics(report: dict, cm: np.ndarray) -> dict:
