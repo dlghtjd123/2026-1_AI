@@ -1,3 +1,10 @@
+"""
+Random Forest 학습과 CICIDS2017 13-class 평가 지표 계산을 담당하는 파일.
+
+전체 macro/weighted 지표뿐 아니라 연구 핵심 대상인 Bot 클래스의
+Precision, Recall, F1, FNR, FPR을 별도로 계산한다.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -15,6 +22,12 @@ from cicids2017_bot_config import BOT_CLASS_ID, CLASS_NAMES
 
 
 def compute_bot_metrics(report: dict, cm: np.ndarray) -> dict:
+    """
+    classification_report와 혼동행렬에서 Bot 클래스 전용 지표를 계산한다.
+
+    Bot 탐지 성능을 보기 위해 TP, FP, FN, TN을 직접 계산하고,
+    Bot Recall의 반대값인 FNR도 함께 반환한다.
+    """
     bot_name = "Bot"
     bot_row = report.get(bot_name, {})
     bot_id = BOT_CLASS_ID
@@ -39,6 +52,12 @@ def compute_bot_metrics(report: dict, cm: np.ndarray) -> dict:
 
 
 def evaluate_predictions(y_test: np.ndarray, pred: np.ndarray) -> dict:
+    """
+    예측 결과를 받아 전체 다중분류 지표와 Bot 클래스 지표를 계산한다.
+
+    반환값에는 정확도, macro precision/recall/F1, weighted F1,
+    Bot 전용 지표, classification report, 혼동행렬이 포함된다.
+    """
     report = classification_report(
         y_test,
         pred,
@@ -68,6 +87,12 @@ def evaluate_rf(
     y_test: np.ndarray,
     n_estimators: int,
 ) -> tuple[RandomForestClassifier, dict]:
+    """
+    증강된 학습 세트로 Random Forest를 학습하고 원본 테스트 세트에서 평가한다.
+
+    테스트 세트는 증강하지 않은 원본 분포를 유지하므로, 증강 방식이 실제 Bot 탐지에
+    도움이 되는지 확인할 수 있다.
+    """
     model = RandomForestClassifier(
         n_estimators=n_estimators,
         random_state=1,

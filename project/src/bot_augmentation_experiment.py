@@ -1,20 +1,20 @@
 """
 bot_augmentation_experiment.py
 
-Fast no-K-fold reproduction-style experiment inspired by AE-CGAN IDS.
+K-Fold를 제외하고 빠르게 수행하는 CICIDS2017 Bot 증강 실험 자동화 파일.
 
-Protocol:
-  CICIDS2017 13-class data
-    -> train/test split
-    -> MinMax scaling fitted on train only
-    -> optional Autoencoder fitted on train only
-    -> compare scaled-original and/or AE latent feature spaces
-    -> augment Bot class only
-    -> RF 13-class classification
-    -> report overall metrics and Bot-class metrics
+실험 흐름:
+  CICIDS2017 13개 클래스 데이터
+    -> 학습/테스트 분할
+    -> 학습 세트 기준 MinMax 스케일링
+    -> 선택적으로 학습 세트 기준 Autoencoder 학습
+    -> 원본 scaled feature 또는 AE latent feature 비교
+    -> Bot 클래스만 증강
+    -> Random Forest 기반 13개 클래스 다중 분류
+    -> 전체 지표와 Bot 클래스 전용 지표 저장
 
-This script intentionally avoids K-fold for the first screening experiment.
-If Bot metrics improve, run K-fold later as a follow-up validation.
+초기 탐색 실험의 학습 시간을 줄이기 위해 K-Fold는 의도적으로 제외한다.
+Bot 성능 향상이 확인된 조합은 후속 검증 단계에서 K-Fold를 적용할 수 있다.
 """
 
 from __future__ import annotations
@@ -56,6 +56,12 @@ from augment_wgan_gp import augment_wgan_gp
 
 
 def parse_args() -> argparse.Namespace:
+    """
+    전체 실험에 필요한 명령행 인자를 정의하고 파싱한다.
+
+    증강 방식, feature 공간, 학습/테스트 비율, epoch, 목표 Bot 개수,
+    Random Forest 트리 개수 등을 명령행 옵션으로 받을 수 있다.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--augments",
@@ -80,42 +86,48 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=["rf"],
         choices=["rf"],
-        help="Classifier to train for each feature-space/augmentation pair.",
+        help="각 feature 공간과 증강 방식 조합에서 학습할 분류기.",
     )
     parser.add_argument("--rf_estimators", type=int, default=100)
     parser.add_argument(
         "--preprocess",
         choices=["paper", "log1p"],
         default="paper",
-        help="paper=MinMax only, log1p=log1p selected skewed flow features before MinMax.",
+        help="paper=MinMax만 적용, log1p=일부 왜도 큰 flow feature에 log1p 적용 후 MinMax.",
     )
     parser.add_argument(
         "--feature_spaces",
         nargs="+",
         default=["ae"],
         choices=["raw", "ae"],
-        help="Feature spaces to evaluate: raw=scaled original, ae=AE latent.",
+        help="평가할 feature 공간. raw=스케일링된 원본 feature, ae=AE latent feature.",
     )
     parser.add_argument(
         "--include_single_rf",
         action="store_true",
-        help="Deprecated alias for --feature_spaces raw ae.",
+        help="이전 실행 호환용 옵션. --feature_spaces raw ae와 같은 의미.",
     )
     parser.add_argument(
         "--max_rows",
         type=int,
         default=None,
-        help="Optional stratified debug sample before train/test split.",
+        help="학습/테스트 분할 전 클래스 비율을 유지하며 일부 행만 사용하는 디버깅 옵션.",
     )
     parser.add_argument(
         "--skip_ae",
         action="store_true",
-        help="Use scaled original features instead of AE latent features.",
+        help="AE latent feature 대신 스케일링된 원본 feature만 사용한다.",
     )
     return parser.parse_args()
 
 
 def target_bot_count(y_train: np.ndarray, requested: int) -> int:
+    """
+    요청한 Bot 목표 개수를 실제로 사용할 목표 개수로 보정한다.
+
+    현재 학습 세트의 Bot 개수가 requested보다 이미 많으면 증강이 필요 없으므로
+    현재 Bot 개수를 그대로 반환한다.
+    """
     current = int((y_train == BOT_CLASS_ID).sum())
     if requested <= current:
         return current
@@ -123,6 +135,11 @@ def target_bot_count(y_train: np.ndarray, requested: int) -> int:
 
 
 def _sample_rows(X: np.ndarray, max_rows: int, seed_offset: int = 0) -> np.ndarray:
+    """
+    생성 데이터 진단 계산 시간을 줄이기 위해 최대 max_rows개만 샘플링한다.
+
+    seed_offset을 달리하여 실제/생성 샘플링이 같은 난수열에 묶이지 않도록 한다.
+    """
     if len(X) <= max_rows:
         return X
     rng = np.random.RandomState(RANDOM_STATE + seed_offset)
@@ -137,6 +154,12 @@ def compute_synthetic_diagnostics(
     augment: str,
     max_probe_rows: int = 5000,
 ) -> dict:
+    """
+    생성형 증강으로 만든 Bot 샘플의 품질을 수치로 진단한다.
+
+    실제/생성 구분 AUC, 생성-실제 최근접 이웃 거리, 생성 샘플끼리의 밀집도,
+    평균/표준편차 차이 등을 계산하여 synthetic_diagnostics.csv에 저장한다.
+    """
     real = _sample_rows(X_real_bot.astype(np.float32), max_probe_rows, seed_offset=11)
     fake = _sample_rows(X_fake_bot.astype(np.float32), max_probe_rows, seed_offset=23)
     eps = 1e-8
@@ -209,6 +232,12 @@ def save_outputs(
     ae_model: Autoencoder | None,
     trained_models: dict[str, object],
 ) -> Path:
+    """
+    학습 결과와 산출물을 하나의 run 디렉터리에 저장한다.
+
+    summary.csv, results.json, synthetic_diagnostics.csv, features.json,
+    scaler, 학습된 Random Forest 모델, 선택적으로 AE 모델을 저장한다.
+    """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUT_DIR / f"run_{run_id}"
@@ -232,6 +261,12 @@ def save_outputs(
 
 
 def run_training(args: argparse.Namespace) -> Path:
+    """
+    데이터 로드부터 증강, RF 학습, 평가, 결과 저장까지 전체 실험을 수행한다.
+
+    테스트 세트는 처음에 분리한 뒤 끝까지 원본 상태로 유지하고,
+    증강은 학습 세트의 Bot 클래스에만 적용한다.
+    """
     if args.include_single_rf and "raw" not in args.feature_spaces:
         args.feature_spaces = ["raw", *args.feature_spaces]
     args.feature_spaces = list(dict.fromkeys(args.feature_spaces))
@@ -447,6 +482,7 @@ def run_training(args: argparse.Namespace) -> Path:
 
 
 def main() -> None:
+    """명령행 인자를 파싱한 뒤 전체 실험을 실행한다."""
     run_training(parse_args())
 
 
