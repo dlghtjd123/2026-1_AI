@@ -14,9 +14,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from cicids2017_bot_config import RANDOM_STATE
 
 BOT_CLASS_ID = 3
-RANDOM_STATE = 42
 
 
 class Generator(nn.Module):
