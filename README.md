@@ -62,7 +62,7 @@ Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
 7. train set의 Bot 클래스만 목표 개수까지 증강
 8. 증강 train set으로 RF 학습
 9. 원본 test set으로 13-class 평가
-10. summary.csv, results.json, synthetic_diagnostics.csv 저장
+10. summary.csv, none_class_report.csv, results.json, synthetic_diagnostics.csv 저장
 ```
 
 중요한 점은 **test set은 증강하지 않는다**는 것이다. 증강은 train set의 Bot 클래스에만 적용된다.
@@ -128,6 +128,23 @@ python project/src/run_bot_augmentation_experiment.py `
 --target_bot_count 50000
 ```
 
+3,000 / 5,000 / 10,000 / 20,000 / 50,000을 한 번에 순서대로 실행하려면:
+
+```powershell
+foreach ($target in 3000, 5000, 10000, 20000, 50000) {
+  python project/src/run_bot_augmentation_experiment.py `
+    --augments none ros smote borderline_smote adasyn gan wgan_gp `
+    --feature_spaces raw `
+    --test_size 0.4 `
+    --preprocess paper `
+    --models rf `
+    --gan_epochs 100 `
+    --wgan_epochs 100 `
+    --target_bot_count $target `
+    --rf_estimators 100
+}
+```
+
 ## 빠른 확인용 실행
 
 전체 데이터로 돌리기 전에 코드가 정상 동작하는지만 빠르게 확인할 때 사용한다.
@@ -183,14 +200,17 @@ python project/src/run_bot_augmentation_experiment.py `
 실행 결과는 아래 경로에 저장된다.
 
 ```text
-artifacts/ae_cgan_bot_multiclass/run_YYYYMMDD_HHMMSS/
+artifacts/ae_cgan_bot_multiclass/run_YYYYMMDD_HHMMSS_TARGET/
 ```
+
+예를 들어 `--target_bot_count 3000`으로 실행하면 폴더 마지막에 `_3000`이 붙는다.
 
 주요 파일:
 
 | 파일 | 내용 |
 |---|---|
 | `summary.csv` | 실험별 핵심 metric 표 |
+| `none_class_report.csv` | 증강 없음 baseline의 전체 클래스별 Precision/Recall/F1/Support |
 | `results.json` | classification report, confusion matrix 포함 상세 결과 |
 | `synthetic_diagnostics.csv` | GAN/WGAN-GP 생성 데이터 품질 진단 |
 | `features.json` | 사용 feature 목록 |

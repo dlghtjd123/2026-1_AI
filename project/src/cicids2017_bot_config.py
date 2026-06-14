@@ -16,7 +16,7 @@ SRC_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SRC_DIR.parent
 ROOT_DIR = PROJECT_DIR.parent
 RAW_DIR = PROJECT_DIR / "data" / "raw" / "cic-ids2017"
-OUT_DIR = ROOT_DIR / "artifacts" / "ae_cgan_bot_multiclass"
+OUT_DIR = ROOT_DIR / "artifacts" / "cicids2017_bot_multiclass"
 
 CLASS_NAMES = [
     "Benign",

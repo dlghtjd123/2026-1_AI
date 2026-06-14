@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import datetime
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -227,20 +228,22 @@ def save_outputs(
     results: dict,
     summary_rows: list[dict],
     synthetic_diagnostic_rows: list[dict],
+    none_class_report_rows: list[dict],
     scaler: MinMaxScaler,
     feature_cols: list[str],
     ae_model: Autoencoder | None,
     trained_models: dict[str, object],
+    target_count: int,
 ) -> Path:
     """
     학습 결과와 산출물을 하나의 run 디렉터리에 저장한다.
 
-    summary.csv, results.json, synthetic_diagnostics.csv, features.json,
-    scaler, 학습된 Random Forest 모델, 선택적으로 AE 모델을 저장한다.
+    summary.csv, none_class_report.csv, results.json, synthetic_diagnostics.csv,
+    features.json, scaler, 학습된 Random Forest 모델, 선택적으로 AE 모델을 저장한다.
     """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = OUT_DIR / f"run_{run_id}"
+    run_dir = OUT_DIR / f"run_{run_id}_{target_count}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     with open(run_dir / "results.json", "w", encoding="utf-8") as fp:
@@ -250,6 +253,10 @@ def save_outputs(
         pd.DataFrame(synthetic_diagnostic_rows).to_csv(
             run_dir / "synthetic_diagnostics.csv", index=False
         )
+    if none_class_report_rows:
+        pd.DataFrame(none_class_report_rows).to_csv(
+            run_dir / "none_class_report.csv", index=False
+        )
     with open(run_dir / "features.json", "w", encoding="utf-8") as fp:
         json.dump({"features": feature_cols, "classes": CLASS_NAMES}, fp, indent=4, ensure_ascii=False)
     joblib.dump(scaler, run_dir / "scaler.pkl")
@@ -258,6 +265,128 @@ def save_outputs(
     if ae_model is not None:
         torch.save(ae_model.state_dict(), run_dir / "autoencoder.pt")
     return run_dir
+
+
+def append_none_class_report_rows(
+    rows: list[dict],
+    model_name: str,
+    augment: str,
+    feature_label: str,
+    metrics: dict,
+) -> None:
+    """
+    증강하지 않은 baseline의 클래스별 성능을 CSV 저장용 행으로 변환한다.
+
+    본 연구는 Bot 클래스만 증강하지만 전체 문제는 13개 클래스 다중분류이므로,
+    none baseline에서 각 공격 유형의 Precision, Recall, F1, Support를 함께 저장한다.
+    """
+    if augment != "none":
+        return
+
+    report = metrics["classification_report"]
+    for class_name in CLASS_NAMES:
+        class_metrics = report.get(class_name, {})
+        row = {
+            "model": model_name,
+            "augment": augment,
+            "feature_space": feature_label,
+            "class_name": class_name,
+            "precision": float(class_metrics.get("precision", 0.0)),
+            "recall": float(class_metrics.get("recall", 0.0)),
+            "f1": float(class_metrics.get("f1-score", 0.0)),
+            "support": int(class_metrics.get("support", 0)),
+        }
+        rows.append(row)
+
+
+def apply_augmentation_method(
+    augment: str,
+    X_train_base: np.ndarray,
+    y_train: np.ndarray,
+    target_count: int,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, object | None, np.ndarray | None]:
+    """
+    선택된 증강 방식 하나를 학습 데이터에 적용한다.
+
+    모든 증강은 train set의 Bot 클래스만 대상으로 하며, test set에는 적용하지 않는다.
+    """
+    if augment == "none":
+        return X_train_base, y_train, None, None
+    if augment == "ros":
+        X_aug, y_aug = augment_ros(
+            X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
+        )
+        return X_aug, y_aug, None, None
+    if augment == "smote":
+        X_aug, y_aug = augment_smote(
+            X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
+        )
+        return X_aug, y_aug, None, None
+    if augment == "borderline_smote":
+        X_aug, y_aug = augment_borderline_smote(
+            X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
+        )
+        return X_aug, y_aug, None, None
+    if augment == "adasyn":
+        X_aug, y_aug = augment_adasyn(
+            X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
+        )
+        return X_aug, y_aug, None, None
+    if augment == "gan":
+        return augment_gan(
+            X_train_base,
+            y_train,
+            target_count,
+            noise_dim=args.noise_dim,
+            epochs=args.gan_epochs,
+            batch_size=args.gan_batch_size,
+            device=device,
+        )
+    if augment == "wgan_gp":
+        return augment_wgan_gp(
+            X_train_base,
+            y_train,
+            target_count,
+            noise_dim=args.noise_dim,
+            epochs=args.wgan_epochs,
+            batch_size=args.wgan_batch_size,
+            n_critic=args.wgan_n_critic,
+            lambda_gp=args.wgan_lambda_gp,
+            device=device,
+        )
+    raise ValueError(augment)
+
+
+def build_summary_row(
+    model_name: str,
+    augment: str,
+    feature_label: str,
+    metrics: dict,
+    y_train_aug: np.ndarray,
+) -> dict:
+    """
+    평가 지표를 summary.csv에 저장할 한 행으로 변환한다.
+    """
+    return {
+        "model": model_name,
+        "augment": augment,
+        "feature_space": feature_label,
+        "accuracy": metrics["accuracy"],
+        "macro_precision": metrics["macro_precision"],
+        "macro_recall": metrics["macro_recall"],
+        "macro_f1": metrics["macro_f1"],
+        "weighted_f1": metrics["weighted_f1"],
+        "bot_precision": metrics["bot"]["precision"],
+        "bot_recall": metrics["bot"]["recall"],
+        "bot_f1": metrics["bot"]["f1"],
+        "bot_fnr": metrics["bot"]["fnr"],
+        "bot_fpr": metrics["bot"]["fpr"],
+        "bot_support": metrics["bot"]["support"],
+        "train_size": int(len(y_train_aug)),
+        "train_bot_count": int((y_train_aug == BOT_CLASS_ID).sum()),
+    }
 
 
 def run_training(args: argparse.Namespace) -> Path:
@@ -340,6 +469,7 @@ def run_training(args: argparse.Namespace) -> Path:
     }
     summary_rows = []
     synthetic_diagnostic_rows = []
+    none_class_report_rows = []
     trained_models = {}
 
     for feature_space in args.feature_spaces:
@@ -350,50 +480,14 @@ def run_training(args: argparse.Namespace) -> Path:
             print("=" * 72)
             print(f"[EXPERIMENT] feature_space={feature_space} augment={augment}")
             print("=" * 72)
-            generator = None
-            X_fake_bot = None
-            if augment == "none":
-                X_train_aug, y_train_aug = X_train_base, y_train
-            elif augment == "ros":
-                X_train_aug, y_train_aug = augment_ros(
-                    X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
-                )
-            elif augment == "smote":
-                X_train_aug, y_train_aug = augment_smote(
-                    X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
-                )
-            elif augment == "borderline_smote":
-                X_train_aug, y_train_aug = augment_borderline_smote(
-                    X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
-                )
-            elif augment == "adasyn":
-                X_train_aug, y_train_aug = augment_adasyn(
-                    X_train_base, y_train, target_count, BOT_CLASS_ID, RANDOM_STATE
-                )
-            elif augment == "gan":
-                X_train_aug, y_train_aug, generator, X_fake_bot = augment_gan(
-                    X_train_base,
-                    y_train,
-                    target_count,
-                    noise_dim=args.noise_dim,
-                    epochs=args.gan_epochs,
-                    batch_size=args.gan_batch_size,
-                    device=device,
-                )
-            elif augment == "wgan_gp":
-                X_train_aug, y_train_aug, generator, X_fake_bot = augment_wgan_gp(
-                    X_train_base,
-                    y_train,
-                    target_count,
-                    noise_dim=args.noise_dim,
-                    epochs=args.wgan_epochs,
-                    batch_size=args.wgan_batch_size,
-                    n_critic=args.wgan_n_critic,
-                    lambda_gp=args.wgan_lambda_gp,
-                    device=device,
-                )
-            else:
-                raise ValueError(augment)
+            X_train_aug, y_train_aug, generator, X_fake_bot = apply_augmentation_method(
+                augment,
+                X_train_base,
+                y_train,
+                target_count,
+                args,
+                device,
+            )
 
             if X_fake_bot is not None:
                 diag = compute_synthetic_diagnostics(
@@ -442,24 +536,20 @@ def run_training(args: argparse.Namespace) -> Path:
                     **metrics,
                 }
                 summary_rows.append(
-                    {
-                        "model": model_name,
-                        "augment": augment,
-                        "feature_space": feature_label,
-                        "accuracy": metrics["accuracy"],
-                        "macro_precision": metrics["macro_precision"],
-                        "macro_recall": metrics["macro_recall"],
-                        "macro_f1": metrics["macro_f1"],
-                        "weighted_f1": metrics["weighted_f1"],
-                        "bot_precision": metrics["bot"]["precision"],
-                        "bot_recall": metrics["bot"]["recall"],
-                        "bot_f1": metrics["bot"]["f1"],
-                        "bot_fnr": metrics["bot"]["fnr"],
-                        "bot_fpr": metrics["bot"]["fpr"],
-                        "bot_support": metrics["bot"]["support"],
-                        "train_size": int(len(y_train_aug)),
-                        "train_bot_count": int((y_train_aug == BOT_CLASS_ID).sum()),
-                    }
+                    build_summary_row(
+                        model_name,
+                        augment,
+                        feature_label,
+                        metrics,
+                        y_train_aug,
+                    )
+                )
+                append_none_class_report_rows(
+                    none_class_report_rows,
+                    model_name=model_name,
+                    augment=augment,
+                    feature_label=feature_label,
+                    metrics=metrics,
                 )
                 print(
                     f"[RESULT] model={model_name} feature_space={feature_space} "
@@ -472,10 +562,12 @@ def run_training(args: argparse.Namespace) -> Path:
         results,
         summary_rows,
         synthetic_diagnostic_rows,
+        none_class_report_rows,
         scaler,
         feature_cols,
         ae_model,
         trained_models,
+        target_count,
     )
     print(f"\n[SAVED] {run_dir}")
     return run_dir
